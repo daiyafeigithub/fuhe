@@ -39,7 +39,7 @@ class QRParseResponse(BaseModel):
 class QRVerifyResponse(BaseModel):
     decrypt_content: str
     verify_result: str  # SUCCESS, FAIL, NOT_FOUND, OFFLINE
-    verify_reason: Optional[str]
+    verify_reason: Optional[str] = None
 
 # ====== HIS Integration ======
 class DrugItem(BaseModel):
@@ -57,7 +57,7 @@ class HISPrescriptionSyncRequest(BaseModel):
 class HISPrescriptionResponse(BaseModel):
     pres_no: str
     patient_name: str
-    patient_id: Optional[str]
+    patient_id: Optional[str] = None
     dept_name: str
     doc_name: str
     pres_time: str
@@ -90,7 +90,7 @@ class CheckSubmitRequest(BaseModel):
 # ====== Basket Management ======
 class BasketCreateRequest(BaseModel):
     basket_no: str
-    basket_name: Optional[str]
+    basket_name: Optional[str] = None
     create_by: str
 
 class BasketDrugRelationRequest(BaseModel):
@@ -98,6 +98,7 @@ class BasketDrugRelationRequest(BaseModel):
     basket_no: str
     cj_id_list: List[str]
     create_by: str
+    check_main_id: int
 
 class BasketCheckConfirmRequest(BaseModel):
     pres_no: str
@@ -109,7 +110,7 @@ class ErrorHandleRequest(BaseModel):
     error_id: str
     handle_by: str
     handle_result: str  # REPLACE, ADD, CANCEL
-    handle_desc: Optional[str]
+    handle_desc: Optional[str] = None
 
 # ====== Traceability ======
 class TraceRecordQueryRequest(BaseModel):
@@ -139,14 +140,14 @@ class UserCreateRequest(BaseModel):
     user_name: str
     dept_name: str
     post: str
-    phone: Optional[str]
+    phone: Optional[str] = None
     status: int = 1
 
 class RoleCreateRequest(BaseModel):
     role_code: str
     role_name: str
     role_permission: str
-    role_desc: Optional[str]
+    role_desc: Optional[str] = None
     status: int = 1
 
 class UserRoleBindRequest(BaseModel):
@@ -158,8 +159,29 @@ class DeviceRegisterRequest(BaseModel):
     device_no: str
     device_type: str
     device_name: str
-    bind_station: Optional[str]
-    bind_user: Optional[str]
+    bind_station: Optional[str] = None
+    bind_user: Optional[str] = None
+
+# ====== Enterprise Management ======
+class EnterpriseSaveRequest(BaseModel):
+    code: int
+    name: str
+    status: int = 1
+
+# ====== Trace Report ======
+class TraceReportGenerateRequest(BaseModel):
+    pres_no: str
+
+# ====== Stat Report ======
+class StatReportGenerateRequest(BaseModel):
+    start_date: str
+    end_date: str
+    report_type: str = "detailed"
+
+# ====== Drug Sync ======
+class DrugSyncHISRequest(BaseModel):
+    sync_type: str
+    operate_by: str
 
 # ====== Universal Response ======
 class ApiResponse(BaseModel):

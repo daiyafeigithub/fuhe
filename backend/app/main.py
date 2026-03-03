@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
 import base64
@@ -11,12 +12,22 @@ from datetime import datetime, timedelta
 import time
 from typing import List, Dict, Optional
 import os
+import sys
+import qrcode as qrcode_module
+from io import BytesIO
+
+# 添加项目根目录到 Python 路径
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.database import get_db, Base, engine
 from app import models, schemas
 
 # 创建所有数据库表
 Base.metadata.create_all(bind=engine)
+
+# 创建二维码图片存储目录
+QRCODE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "qrcodes")
+os.makedirs(QRCODE_DIR, exist_ok=True)
 
 # ========== CORS 跨域配置 ==========
 app = FastAPI(title="湖南省二附院精致饮片复核系统 API", version="1.0.0")
@@ -255,6 +266,16 @@ if os.path.exists(frontend_path):
             from fastapi.responses import PlainTextResponse
             return PlainTextResponse("", status_code=404)
 
+# 二维码图片访问路由
+@app.get("/zyfh/qrcodes/{qrcode_id}.png")
+async def get_qrcode_image(qrcode_id: str):
+    """获取二维码图片"""
+    img_path = os.path.join(QRCODE_DIR, f"{qrcode_id}.png")
+    if os.path.exists(img_path):
+        return FileResponse(img_path, media_type="image/png")
+    else:
+        raise HTTPException(status_code=404, detail="二维码图片不存在")
+
 # 应用启动时初始化数据
 init_default_data()
 
@@ -342,24 +363,24 @@ def health_check():
 # ========== 二维码管理模块 ==========
 
 @app.post("/zyfh/api/v1/qrcode/enterprise/save")
-def save_enterprise(code: int, name: str, status: int = 1, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+def save_enterprise(req: schemas.EnterpriseSaveRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """新增/维护企业标志"""
-    existing = db.query(models.Enterprise).filter(models.Enterprise.enterprise_code == code).first()
+    existing = db.query(models.Enterprise).filter(models.Enterprise.enterprise_code == req.code).first()
     if existing:
-        existing.enterprise_name = name
-        existing.status = status
+        existing.enterprise_name = req.name
+        existing.status = req.status
         existing.update_by = current_user.user_account
         existing.update_time = datetime.utcnow()
     else:
         enterprise = models.Enterprise(
-            enterprise_code=code,
-            enterprise_name=name,
-            status=status,
+            enterprise_code=req.code,
+            enterprise_name=req.name,
+            status=req.status,
             create_by=current_user.user_account
         )
         db.add(enterprise)
     db.commit()
-    return success_response({"enterprise_code": code})
+    return success_response({"enterprise_code": req.code})
 
 @app.post("/zyfh/api/v1/qrcode/generate/single")
 def generate_single_qrcode(req: schemas.QRGenerateRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
@@ -432,7 +453,24 @@ def generate_single_qrcode(req: schemas.QRGenerateRequest, db: Session = Depends
     )
     db.add(qrcode)
     db.commit()
-    
+
+    # 7. 生成二维码图片
+    try:
+        qr = qrcode_module.QRCode(
+            version=1,
+            error_correction=qrcode_module.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(qrcode_origin)
+        qr.make(fit=True)
+
+        img = qr.make_image(fill_color="black", back_color="white")
+        img_path = os.path.join(QRCODE_DIR, f"{qrcode_id}.png")
+        img.save(img_path)
+    except Exception as e:
+        print(f"二维码图片生成失败: {e}")
+
     return success_response({
         "qrcode_id": qrcode_id,
         "qrcode_content": qrcode_origin,
@@ -1051,7 +1089,6 @@ def list_error_records(pres_no: str = None, error_status: int = None,
                 "pres_no": r.pres_no,
                 "error_type": r.error_type,
                 "error_desc": r.error_desc,
-                "error_level": r.error_level,
                 "error_status": r.error_status,
                 "handle_type": r.handle_type,
                 "error_by": r.error_by,
@@ -1245,18 +1282,18 @@ def query_video_link(pres_no: str, scan_time: str, check_station: str,
     })
 
 @app.post("/zyfh/api/v1/trace/report/generate")
-def generate_trace_report(pres_no: str, db: Session = Depends(get_db), 
+def generate_trace_report(req: schemas.TraceReportGenerateRequest, db: Session = Depends(get_db),
                          current_user=Depends(get_current_user)):
     """生成溯源报告"""
     # 查询该处方的所有操作记录
     records = db.query(models.CheckOperateRecord).filter(
-        models.CheckOperateRecord.pres_no == pres_no
+        models.CheckOperateRecord.pres_no == req.pres_no
     ).order_by(models.CheckOperateRecord.operate_time).all()
-    
+
     # 生成报告内容
     report_content = {
         "report_id": f"RPT{int(time.time())}",
-        "pres_no": pres_no,
+        "pres_no": req.pres_no,
         "total_operations": len(records),
         "operations": [
             {
@@ -1269,10 +1306,10 @@ def generate_trace_report(pres_no: str, db: Session = Depends(get_db),
         "generated_by": current_user.user_account,
         "generated_time": datetime.utcnow().isoformat()
     }
-    
+
     return success_response({
         "report_id": f"RPT{int(time.time())}",
-        "pres_no": pres_no,
+        "pres_no": req.pres_no,
         "operation_count": len(records),
         "status": "generated"
     })
@@ -1328,22 +1365,22 @@ def query_workload_stat(req: schemas.WorkloadStatQueryRequest = Depends(),
     })
 
 @app.post("/zyfh/api/v1/stat/report/generate")
-def generate_stat_report(start_date: str, end_date: str, report_type: str = "detailed",
+def generate_stat_report(req: schemas.StatReportGenerateRequest,
                         db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """生成统计报告（含图表数据）"""
     stats = db.query(models.CheckWorkloadStat).order_by(
         models.CheckWorkloadStat.stat_date
     ).limit(30).all()
-    
+
     total_pres = sum([s.pres_total for s in stats])
     total_drugs = sum([s.drug_total for s in stats])
-    total_qualified = sum([s.qualified_total for s in stats])
+    total_qualified = sum([s.qualified_pres for s in stats])
     total_errors = sum([s.error_total for s in stats])
     qualified_rate = (total_qualified / total_drugs * 100) if total_drugs > 0 else 0
-    
+
     return success_response({
         "report_id": f"STAT{int(time.time())}",
-        "period": f"{start_date} - {end_date}",
+        "period": f"{req.start_date} - {req.end_date}",
         "total_prescriptions": total_pres,
         "total_drugs": total_drugs,
         "total_qualified": total_qualified,
@@ -1544,16 +1581,16 @@ def save_device(req: schemas.DeviceRegisterRequest, db: Session = Depends(get_db
     return success_response({"device_no": req.device_no, "status": "saved"})
 
 @app.post("/zyfh/api/v1/sys/base/drug/sync/his")
-def sync_his_drug_base(sync_type: str, operate_by: str, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+def sync_his_drug_base(req: schemas.DrugSyncHISRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """院内药品基础数据同步（从HIS）"""
     # Mock 实现，实际应调用HIS系统接口
     success_count = 0
     fail_count = 0
-    
-    if sync_type == "ALL":
+
+    if req.sync_type == "ALL":
         # 全量同步：清空本地数据，重新同步
         # 在实际应用中，这里会调用HIS系统的接口获取药品数据
-        
+
         # Mock 数据
         mock_drugs = [
             {"cj_id": "13310", "drug_name": "盐巴戟天", "drug_type": "补益药", "spec_range": "5g,10g"},
@@ -1562,7 +1599,7 @@ def sync_his_drug_base(sync_type: str, operate_by: str, db: Session = Depends(ge
             {"cj_id": "13313", "drug_name": "山药", "drug_type": "补益药", "spec_range": "10g,15g"},
             {"cj_id": "13314", "drug_name": "茯苓", "drug_type": "利水渗湿药", "spec_range": "10g,15g"}
         ]
-        
+
         for drug_data in mock_drugs:
             existing = db.query(models.DrugInfo).filter(models.DrugInfo.cj_id == drug_data["cj_id"]).first()
             if existing:
@@ -1583,18 +1620,18 @@ def sync_his_drug_base(sync_type: str, operate_by: str, db: Session = Depends(ge
                 )
                 db.add(drug)
             success_count += 1
-    
-    elif sync_type == "UPDATE":
+
+    elif req.sync_type == "UPDATE":
         # 增量更新：仅同步HIS中新增/修改的药品数据
         # 在实际应用中，这里会调用HIS系统的接口获取增量数据
         success_count = 0  # Mock 没有增量数据
     else:
         return error_response("1000", "同步类型错误，应为ALL或UPDATE")
-    
+
     db.commit()
-    
+
     return success_response({
-        "syncType": sync_type,
+        "syncType": req.sync_type,
         "successCount": success_count,
         "failCount": fail_count,
         "syncTime": datetime.utcnow().isoformat()
