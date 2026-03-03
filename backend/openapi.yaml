@@ -1,0 +1,52 @@
+openapi: 3.0.0
+info:
+  title: 精致饮片复核系统 API（PoC）
+  version: 0.1.0
+paths:
+  /zyfh/api/v1/health:
+    get:
+      summary: 健康检查
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+  /zyfh/api/v1/qr/generate:
+    post:
+      summary: 生成 QR 字符串（示例）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enterprise:
+                  type: string
+                cj_id:
+                  type: string
+                spec:
+                  type: string
+                batch:
+                  type: string
+                num:
+                  type: integer
+                weight:
+                  type: number
+      responses:
+        '200':
+          description: QR 生成结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  qr_string:
+                    type: string
+                  raw:
+                    type: string
