@@ -3,7 +3,13 @@
     <el-card class="login-card">
       <template #header>
         <div class="card-header">
-          <h2>湖南省二附院精致饮片复核系统</h2>
+          <div class="title-row">
+            <span class="title-icon">
+              <HerbLeafIcon :size="24" />
+            </span>
+            <h2>湖南省二附院饮片复核系统</h2>
+          </div>
+          <p>中药材管理系统登录</p>
         </div>
       </template>
       <el-form ref="loginFormRef" :model="loginForm" :rules="rules" label-width="80px">
@@ -32,7 +38,7 @@
         </el-form-item>
       </el-form>
       <div class="login-tips">
-        <p>默认管理员账号：admin / 123456a@</p>
+        <p>默认管理员账号：admin / admin123</p>
       </div>
     </el-card>
   </div>
@@ -42,6 +48,7 @@
 import { ref, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
+import HerbLeafIcon from '@/components/icons/HerbLeafIcon.vue'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -80,28 +87,58 @@ const handleLogin = async () => {
   justify-content: center;
   align-items: center;
   height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background:
+    radial-gradient(circle at 20% 16%, rgba(120, 146, 98, 0.07), transparent 35%),
+    radial-gradient(circle at 80% 75%, rgba(74, 112, 35, 0.05), transparent 30%),
+    var(--el-bg-color-page);
 }
 
 .login-card {
-  width: 400px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  width: 420px;
+  border: 1px solid var(--el-border-color-light);
+  box-shadow: 0 10px 28px rgba(62, 74, 50, 0.12);
 }
 
 .card-header {
   text-align: center;
 }
 
+.title-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.title-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--el-color-primary-dark-2);
+  background: rgba(120, 146, 98, 0.1);
+  border: 1px solid rgba(120, 146, 98, 0.22);
+}
+
 .card-header h2 {
   margin: 0;
-  color: #333;
-  font-size: 20px;
+  color: var(--el-text-color-primary);
+  font-size: 22px;
+  font-family: "Songti SC", "STSong", "Source Han Serif SC", serif;
+}
+
+.card-header p {
+  margin-top: 8px;
+  color: #6a7665;
+  font-size: 13px;
 }
 
 .login-tips {
   margin-top: 15px;
   text-align: center;
-  color: #909399;
+  color: #7a8473;
   font-size: 12px;
 }
 

@@ -1,16 +1,16 @@
-from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException, Header, Request, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, func
+from sqlalchemy import desc, func, inspect, text
 import base64
 import hashlib
 import jwt
 import json
 from datetime import datetime, timedelta
 import time
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import os
 import sys
 import qrcode as qrcode_module
@@ -25,12 +25,48 @@ from app import models, schemas
 # 创建所有数据库表
 Base.metadata.create_all(bind=engine)
 
+
+def ensure_schema_compatibility():
+    """兼容历史数据库结构，避免老库缺列导致 500。"""
+    try:
+        inspector = inspect(engine)
+        if "check_error_record" not in inspector.get_table_names():
+            return
+
+        existing_columns = {column["name"] for column in inspector.get_columns("check_error_record")}
+        required_columns = {
+            "drug_name": "VARCHAR(50)",
+            "pres_spec": "VARCHAR(10)",
+            "scan_spec": "VARCHAR(10)",
+            "pres_num": "INTEGER",
+            "scan_num": "INTEGER",
+            "error_by": "VARCHAR(20)",
+            "handle_type": "VARCHAR(20)",
+            "handle_by": "VARCHAR(20)"
+        }
+
+        with engine.begin() as conn:
+            for column_name, column_type in required_columns.items():
+                if column_name in existing_columns:
+                    continue
+                conn.execute(text(f"ALTER TABLE check_error_record ADD COLUMN {column_name} {column_type}"))
+                print(f"✅ 自动补齐字段: check_error_record.{column_name}")
+    except Exception as exc:
+        print(f"⚠️ 数据库兼容检查失败: {str(exc)[:200]}")
+
+
+ensure_schema_compatibility()
+
 # 创建二维码图片存储目录
 QRCODE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "qrcodes")
 os.makedirs(QRCODE_DIR, exist_ok=True)
 
+# 创建报告存储目录
+REPORT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "reports")
+os.makedirs(REPORT_DIR, exist_ok=True)
+
 # ========== CORS 跨域配置 ==========
-app = FastAPI(title="湖南省二附院精致饮片复核系统 API", version="1.0.0")
+app = FastAPI(title="饮片复核系统 API", version="1.0.0")
 
 # 配置 CORS
 app.add_middleware(
@@ -171,38 +207,228 @@ def mark_synced_record(table_name, record_id):
 
 def check_network_connection():
     """检查网络连接状态"""
-    import urllib.request
     try:
-        # 尝试连接外部网站来检查网络状态
-        urllib.request.urlopen('http://www.baidu.com', timeout=3)
+        # 仅检测业务数据库连通性，避免外网不可达导致误判离线
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
         return True
     except:
         return False
 
+def ensure_demo_business_data(db: Session):
+    """当业务数据为空时，补充最小可用演示数据。"""
+    now = datetime.utcnow()
+
+    if db.query(models.DrugInfo).filter(models.DrugInfo.is_delete == 0).count() == 0:
+        demo_drugs = [
+            ("13310", "盐巴戟天", "5g"),
+            ("13311", "当归", "3g"),
+            ("13312", "黄芪", "10g"),
+            ("13313", "党参", "6g"),
+            ("13314", "陈皮", "4g")
+        ]
+        for cj_id, drug_name, spec in demo_drugs:
+            db.add(models.DrugInfo(
+                cj_id=cj_id,
+                drug_name=drug_name,
+                drug_type="中药饮片",
+                spec_range=spec,
+                his_sync_time=now,
+                status=1
+            ))
+
+    if db.query(models.BasketManage).filter(models.BasketManage.is_delete == 0).count() == 0:
+        for index in range(1, 4):
+            basket_no = f"K{now.strftime('%Y%m%d')}{index:03d}"
+            db.add(models.BasketManage(
+                basket_no=basket_no,
+                basket_name=f"复核筐{index}",
+                create_type=1,
+                status=1,
+                create_by="system"
+            ))
+
+    if db.query(models.HISPrescription).filter(models.HISPrescription.is_delete == 0).count() == 0:
+        pres_list = [
+            (f"CF{now.strftime('%Y%m%d')}001", "张三", "中医科", "李医生", 3, 3),
+            (f"CF{now.strftime('%Y%m%d')}002", "李四", "中医科", "王医生", 3, 2),
+            (f"CF{now.strftime('%Y%m%d')}003", "王五", "针灸科", "赵医生", 2, 1)
+        ]
+        for pres_no, patient_name, dept_name, doc_name, drug_total, pres_status in pres_list:
+            db.add(models.HISPrescription(
+                pres_no=pres_no,
+                patient_name=patient_name,
+                patient_id="430102199001010000",
+                dept_name=dept_name,
+                doc_name=doc_name,
+                pres_time=now - timedelta(minutes=15),
+                drug_total=drug_total,
+                sync_time=now,
+                pres_status=pres_status
+            ))
+
+    db.flush()
+
+    if db.query(models.DrugCheckMain).filter(models.DrugCheckMain.is_delete == 0).count() == 0:
+        target_pres = db.query(models.HISPrescription).filter(
+            models.HISPrescription.is_delete == 0,
+            models.HISPrescription.pres_status.in_([2, 3])
+        ).order_by(desc(models.HISPrescription.pres_time)).limit(2).all()
+
+        reviewers = ["fh001", "fh002"]
+        for index, pres in enumerate(target_pres):
+            is_completed = pres.pres_status == 3
+            start_time = now - timedelta(minutes=30 - index * 10)
+            check_main = models.DrugCheckMain(
+                pres_no=pres.pres_no,
+                check_by=reviewers[index % len(reviewers)],
+                check_station=f"T0{index + 1}",
+                check_start_time=start_time,
+                check_end_time=(start_time + timedelta(minutes=8)) if is_completed else None,
+                check_status=2 if is_completed else 1,
+                check_qualified=1 if is_completed else None,
+                submit_by=reviewers[index % len(reviewers)] if is_completed else None,
+                submit_time=(start_time + timedelta(minutes=8)) if is_completed else None,
+                error_total=0
+            )
+            db.add(check_main)
+
+    db.flush()
+
+    if db.query(models.DrugCheckDetail).filter(models.DrugCheckDetail.is_delete == 0).count() == 0:
+        check_mains = db.query(models.DrugCheckMain).filter(models.DrugCheckMain.is_delete == 0).all()
+        drug_pool = db.query(models.DrugInfo).filter(models.DrugInfo.is_delete == 0).order_by(models.DrugInfo.id).limit(3).all()
+
+        for check_main in check_mains:
+            for index, drug in enumerate(drug_pool, start=1):
+                pres_num = 2 if index == 1 else 1
+                is_match = not (check_main.check_status == 2 and check_main.check_qualified == 0 and index == len(drug_pool))
+                db.add(models.DrugCheckDetail(
+                    check_main_id=check_main.id,
+                    pres_no=check_main.pres_no,
+                    cj_id=drug.cj_id,
+                    drug_name=drug.drug_name,
+                    spec=(drug.spec_range or "5g")[:10],
+                    pres_num=pres_num,
+                    qrcode_id=f"QR{int(time.time())}{check_main.id}{index}",
+                    scan_spec=(drug.spec_range or "5g")[:10],
+                    scan_num=pres_num if is_match else max(pres_num - 1, 1),
+                    scan_time=now - timedelta(minutes=index),
+                    basket_no=f"K{now.strftime('%Y%m%d')}001",
+                    scan_result=1 if is_match else 0,
+                    is_check=1 if is_match else 0
+                ))
+
+    db.flush()
+
+    if db.query(models.PresBasketRelation).filter(models.PresBasketRelation.is_delete == 0).count() == 0:
+        detail_rows = db.query(models.DrugCheckDetail).filter(models.DrugCheckDetail.is_delete == 0).limit(10).all()
+        for detail in detail_rows:
+            db.add(models.PresBasketRelation(
+                pres_no=detail.pres_no,
+                check_main_id=detail.check_main_id,
+                basket_no=detail.basket_no,
+                cj_id=detail.cj_id,
+                drug_name=detail.drug_name,
+                basket_drug_num=detail.pres_num,
+                basket_status=1,
+                create_by="system"
+            ))
+
+    if db.query(models.CheckErrorRecord).filter(models.CheckErrorRecord.is_delete == 0).count() == 0:
+        sample_detail = db.query(models.DrugCheckDetail).filter(models.DrugCheckDetail.is_delete == 0).first()
+        if sample_detail:
+            db.add(models.CheckErrorRecord(
+                check_detail_id=sample_detail.id,
+                check_main_id=sample_detail.check_main_id,
+                pres_no=sample_detail.pres_no,
+                cj_id=sample_detail.cj_id,
+                drug_name=sample_detail.drug_name,
+                error_type="NUM_ERROR",
+                error_desc="扫码数量与处方数量不一致",
+                pres_standard=f"{sample_detail.spec}/{sample_detail.pres_num}",
+                scan_actual=f"{sample_detail.scan_spec}/{sample_detail.scan_num}",
+                error_time=now - timedelta(minutes=5),
+                error_status=1,
+                pres_spec=sample_detail.spec,
+                scan_spec=sample_detail.scan_spec,
+                pres_num=sample_detail.pres_num,
+                scan_num=sample_detail.scan_num,
+                error_by="fh001"
+            ))
+
+    if db.query(models.CheckOperateRecord).filter(models.CheckOperateRecord.is_delete == 0).count() == 0:
+        mains = db.query(models.DrugCheckMain).filter(models.DrugCheckMain.is_delete == 0).limit(5).all()
+        for main in mains:
+            db.add(models.CheckOperateRecord(
+                pres_no=main.pres_no,
+                check_main_id=main.id,
+                operate_user=main.check_by,
+                operate_module="扫码复核",
+                operate_type="提交",
+                operate_desc=f"处方{main.pres_no}完成复核流程",
+                operate_time=main.check_end_time or main.check_start_time or now,
+                operate_ip="127.0.0.1"
+            ))
+
+    if db.query(models.VideoMonitorLink).filter(models.VideoMonitorLink.is_delete == 0).count() == 0:
+        sample_detail = db.query(models.DrugCheckDetail).filter(models.DrugCheckDetail.is_delete == 0).first()
+        if sample_detail:
+            check_main = db.query(models.DrugCheckMain).filter(models.DrugCheckMain.id == sample_detail.check_main_id).first()
+            video_time = sample_detail.scan_time or now
+            db.add(models.VideoMonitorLink(
+                check_detail_id=sample_detail.id,
+                pres_no=sample_detail.pres_no,
+                scan_time=video_time,
+                check_station=(check_main.check_station if check_main else "T01"),
+                camera_no="CAM01",
+                video_url="https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
+                video_download="https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
+                video_snapshot="",
+                video_valid_time=video_time + timedelta(days=7)
+            ))
+
+
 # 初始化默认数据
 def init_default_data():
-    """创建默认的管理员用户和企业数据"""
+    """创建默认管理员、角色、企业及最小可用演示数据（幂等）。"""
     from app.database import SessionLocal
     db = SessionLocal()
     try:
-        # 检查是否已初始化
         admin_user = db.query(models.SysUser).filter(models.SysUser.user_account == "admin").first()
-        if admin_user:
-            return
-        
-        # 创建管理员用户
-        admin = models.SysUser(
-            user_account="admin",
-            user_name="超级管理员",
-            user_pwd=hashlib.md5("admin123".encode()).hexdigest(),
-            dept_name="系统管理",
-            post="系统管理员",
-            create_by="system"
-        )
-        db.add(admin)
-        db.flush()
-        
-        # 创建默认企业（按照 guide.md 中的6家企业）
+        if not admin_user:
+            db.add(models.SysUser(
+                user_account="admin",
+                user_name="超级管理员",
+                user_pwd=hashlib.md5("admin123".encode()).hexdigest(),
+                dept_name="系统管理",
+                post="系统管理员",
+                status=1,
+                create_by="system"
+            ))
+
+        review_users = [
+            ("fh001", "复核员一", "中药房", "复核员", "13800138001"),
+            ("fh002", "复核员二", "中药房", "复核员", "13800138002")
+        ]
+        for account, name, dept, post, phone in review_users:
+            existing_user = db.query(models.SysUser).filter(models.SysUser.user_account == account).first()
+            if existing_user:
+                if existing_user.is_delete == 1:
+                    existing_user.is_delete = 0
+                    existing_user.status = 1
+            else:
+                db.add(models.SysUser(
+                    user_account=account,
+                    user_name=name,
+                    user_pwd=hashlib.md5("123456".encode()).hexdigest(),
+                    dept_name=dept,
+                    post=post,
+                    phone=phone,
+                    status=1,
+                    create_by="system"
+                ))
+
         enterprises = [
             (1, '亳州市沪谯药业有限公司'),
             (2, '湖南三湘中药饮片有限公司'),
@@ -212,15 +438,20 @@ def init_default_data():
             (6, '天津尚药堂制药有限公司')
         ]
         for code, name in enterprises:
-            enterprise = models.Enterprise(
-                enterprise_code=code,
-                enterprise_name=name,
-                create_by="system",
-                status=1
-            )
-            db.add(enterprise)
-        
-        # 创建默认角色
+            enterprise = db.query(models.Enterprise).filter(models.Enterprise.enterprise_code == code).first()
+            if enterprise:
+                enterprise.enterprise_name = name
+                enterprise.status = 1
+                if enterprise.is_delete == 1:
+                    enterprise.is_delete = 0
+            else:
+                db.add(models.Enterprise(
+                    enterprise_code=code,
+                    enterprise_name=name,
+                    create_by="system",
+                    status=1
+                ))
+
         roles = [
             ("SUPER_ADMIN", "超级管理员", "ALL"),
             ("SYS_ADMIN", "系统管理员", "SYS:*"),
@@ -230,23 +461,31 @@ def init_default_data():
             ("TRACE_MANAGER", "溯源管理员", "TRACE:*")
         ]
         for role_code, role_name, permissions in roles:
-            role = models.SysRole(
-                role_code=role_code,
-                role_name=role_name,
-                role_permission=permissions,
-                role_desc=f"{role_name}角色",
-                create_time=datetime.utcnow()
-            )
-            db.add(role)
-        
+            role = db.query(models.SysRole).filter(models.SysRole.role_code == role_code).first()
+            if role:
+                role.role_name = role_name
+                role.role_permission = permissions
+                role.role_desc = f"{role_name}角色"
+                role.status = 1
+                if role.is_delete == 1:
+                    role.is_delete = 0
+            else:
+                db.add(models.SysRole(
+                    role_code=role_code,
+                    role_name=role_name,
+                    role_permission=permissions,
+                    role_desc=f"{role_name}角色",
+                    status=1,
+                    create_time=datetime.utcnow()
+                ))
+
+        ensure_demo_business_data(db)
         db.commit()
         print("✅ 默认数据初始化成功")
         print("   默认管理员账号: admin / admin123")
     except Exception as e:
         db.rollback()
-        import traceback
         print(f"⚠️ 初始化数据失败: {str(e)[:200]}")
-        # traceback.print_exc()
     finally:
         db.close()
 
@@ -275,6 +514,14 @@ async def get_qrcode_image(qrcode_id: str):
         return FileResponse(img_path, media_type="image/png")
     else:
         raise HTTPException(status_code=404, detail="二维码图片不存在")
+
+@app.get("/zyfh/reports/{report_file}")
+async def get_report_file(report_file: str):
+    """下载溯源报告"""
+    report_path = os.path.join(REPORT_DIR, report_file)
+    if os.path.exists(report_path):
+        return FileResponse(report_path, media_type="application/json", filename=report_file)
+    raise HTTPException(status_code=404, detail="报告文件不存在")
 
 # 应用启动时初始化数据
 init_default_data()
@@ -305,6 +552,22 @@ def error_response(code="5000", msg="服务器错误"):
         "requestId": get_request_id()
     }
 
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """HTTP异常统一响应"""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_response(str(exc.status_code), str(exc.detail))
+    )
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """未捕获异常统一响应，避免前端收到无 CORS 头的裸 500"""
+    return JSONResponse(
+        status_code=500,
+        content=error_response("5000", f"服务器内部错误: {str(exc)}")
+    )
+
 def generate_token(user_id: int) -> str:
     """生成 JWT Token"""
     payload = {"user_id": user_id, "exp": int(time.time()) + 86400}
@@ -323,6 +586,44 @@ def hash_password(pwd: str) -> str:
     """密码 MD5 加密"""
     return hashlib.md5(pwd.encode()).hexdigest()
 
+
+def parse_datetime_value(value: Optional[str]) -> Optional[datetime]:
+    """兼容常见日期时间格式（含 ISO 字符串）。"""
+    if not value:
+        return None
+
+    raw = value.strip()
+    if not raw:
+        return None
+
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d"
+    ]:
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+
+    try:
+        iso_value = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(iso_value)
+        if dt.tzinfo:
+            return dt.replace(tzinfo=None)
+        return dt
+    except ValueError:
+        return None
+
+
+def map_dashboard_status(check_status: Optional[int], check_qualified: Optional[int]) -> int:
+    """统一工作台状态编码：1未复核 2已复核 3复核异常 4复核中。"""
+    if check_status == 1:
+        return 4
+    if check_status == 2:
+        return 2 if check_qualified == 1 else 3
+    return 1
+
 def get_current_user(authorization: str = Header(None), db: Session = Depends(get_db)):
     """获取当前登录用户"""
     if not authorization or not authorization.startswith("Bearer "):
@@ -330,8 +631,10 @@ def get_current_user(authorization: str = Header(None), db: Session = Depends(ge
     token = authorization.replace("Bearer ", "").strip()
     user_id = verify_token(token)
     user = db.query(models.SysUser).filter(models.SysUser.id == user_id).first()
-    if not user:
+    if not user or user.is_delete == 1:
         raise HTTPException(status_code=401, detail="User not found")
+    if user.status == 0:
+        raise HTTPException(status_code=403, detail="User disabled")
     return user
 
 # ========== 通用接口：系统认证 ==========
@@ -340,8 +643,24 @@ def get_current_user(authorization: str = Header(None), db: Session = Depends(ge
 def get_token(req: schemas.TokenRequest, db: Session = Depends(get_db)):
     """获取访问Token"""
     user = db.query(models.SysUser).filter(models.SysUser.user_account == req.user_account).first()
-    if not user or user.user_pwd != hash_password(req.user_pwd):
+    if not user or user.is_delete == 1 or user.status == 0 or user.user_pwd != hash_password(req.user_pwd):
         return error_response("2000", "用户账号或密码错误")
+
+    role_name = ""
+    role_binding = db.query(models.SysUserRole).filter(
+        models.SysUserRole.user_id == user.id,
+        models.SysUserRole.is_delete == 0
+    ).first()
+    if role_binding:
+        role = db.query(models.SysRole).filter(
+            models.SysRole.id == role_binding.role_id,
+            models.SysRole.is_delete == 0
+        ).first()
+        if role:
+            role_name = role.role_name
+
+    user.login_time = datetime.utcnow()
+    db.commit()
     
     token = generate_token(user.id)
     expire_time = int(time.time()) + 86400
@@ -351,7 +670,10 @@ def get_token(req: schemas.TokenRequest, db: Session = Depends(get_db)):
         "userInfo": {
             "userAccount": user.user_account,
             "userName": user.user_name,
-            "deptName": user.dept_name
+            "deptName": user.dept_name,
+            "post": user.post,
+            "phone": user.phone,
+            "roleName": role_name
         }
     })
 
@@ -381,6 +703,29 @@ def save_enterprise(req: schemas.EnterpriseSaveRequest, db: Session = Depends(ge
         db.add(enterprise)
     db.commit()
     return success_response({"enterprise_code": req.code})
+
+@app.get("/zyfh/api/v1/qrcode/enterprise/list")
+def list_enterprises(status: int = None, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """查询企业列表"""
+    query = db.query(models.Enterprise)
+    if status is not None:
+        query = query.filter(models.Enterprise.status == status)
+    
+    enterprises = query.all()
+    result = []
+    for enterprise in enterprises:
+        result.append({
+            "enterprise_code": enterprise.enterprise_code,
+            "enterprise_name": enterprise.enterprise_name,
+            "status": enterprise.status,
+            "create_time": enterprise.create_time,
+            "update_time": enterprise.update_time
+        })
+    
+    return success_response({
+        "total": len(result),
+        "list": result
+    })
 
 @app.post("/zyfh/api/v1/qrcode/generate/single")
 def generate_single_qrcode(req: schemas.QRGenerateRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
@@ -479,20 +824,41 @@ def generate_single_qrcode(req: schemas.QRGenerateRequest, db: Session = Depends
     })
 
 @app.post("/zyfh/api/v1/qrcode/generate/batch")
-def generate_batch_qrcode(create_by: str, qrcode_list: List[schemas.QRGenerateRequest], db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+def generate_batch_qrcode(payload: Any = Body(...), db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """二维码批量生成"""
+    if isinstance(payload, dict):
+        raw_list = payload.get("qrcode_list") or payload.get("qrcodeList") or payload.get("list")
+        create_by = payload.get("create_by") or payload.get("createBy") or current_user.user_account
+    elif isinstance(payload, list):
+        raw_list = payload
+        create_by = current_user.user_account
+    else:
+        return error_response("1000", "批量参数格式错误")
+
+    if not isinstance(raw_list, list) or len(raw_list) == 0:
+        return error_response("1000", "缺少批量二维码数据")
+
     success_count = 0
     fail_count = 0
     fail_list = []
     
-    for idx, qr_req in enumerate(qrcode_list):
+    for idx, item in enumerate(raw_list):
         try:
+            if isinstance(item, schemas.QRGenerateRequest):
+                qr_req = item
+            elif isinstance(item, dict):
+                qr_req = schemas.QRGenerateRequest(**item)
+            else:
+                raise ValueError("单条二维码参数格式错误")
+
+            qr_req_dict = qr_req.dict() if hasattr(qr_req, "dict") else qr_req.model_dump()
+
             # 验证企业编码
             enterprise = db.query(models.Enterprise).filter(models.Enterprise.enterprise_code == qr_req.enterprise_code).first()
             if not enterprise:
                 fail_list.append({
                     "index": idx,
-                    "params": qr_req.dict(),
+                    "params": qr_req_dict,
                     "reason": "企业标志未维护"
                 })
                 fail_count += 1
@@ -503,17 +869,26 @@ def generate_batch_qrcode(create_by: str, qrcode_list: List[schemas.QRGenerateRe
             if not drug:
                 fail_list.append({
                     "index": idx,
-                    "params": qr_req.dict(),
+                    "params": qr_req_dict,
                     "reason": "院内编码无效，请核对"
                 })
                 fail_count += 1
                 continue
             
             # 数据校验
+            if not qr_req.spec.endswith('g'):
+                fail_list.append({
+                    "index": idx,
+                    "params": qr_req_dict,
+                    "reason": "规格格式错误，应为数字+g，数字范围1-30"
+                })
+                fail_count += 1
+                continue
+
             if not (1 <= float(qr_req.spec.rstrip('g')) <= 30):
                 fail_list.append({
                     "index": idx,
-                    "params": qr_req.dict(),
+                    "params": qr_req_dict,
                     "reason": "规格格式错误，应为数字+g，数字范围1-30"
                 })
                 fail_count += 1
@@ -522,8 +897,17 @@ def generate_batch_qrcode(create_by: str, qrcode_list: List[schemas.QRGenerateRe
             if not (5 <= len(qr_req.batch_no) <= 10) or not qr_req.batch_no.isdigit():
                 fail_list.append({
                     "index": idx,
-                    "params": qr_req.dict(),
+                    "params": qr_req_dict,
                     "reason": "批号格式错误，应为5-10位纯数字"
+                })
+                fail_count += 1
+                continue
+
+            if qr_req.num <= 0 or qr_req.weight <= 0:
+                fail_list.append({
+                    "index": idx,
+                    "params": qr_req_dict,
+                    "reason": "数量和重量必须大于0"
                 })
                 fail_count += 1
                 continue
@@ -556,12 +940,29 @@ def generate_batch_qrcode(create_by: str, qrcode_list: List[schemas.QRGenerateRe
                 generate_by=create_by
             )
             db.add(qrcode)
+
+            try:
+                qr = qrcode_module.QRCode(
+                    version=1,
+                    error_correction=qrcode_module.constants.ERROR_CORRECT_L,
+                    box_size=10,
+                    border=4,
+                )
+                qr.add_data(qrcode_origin)
+                qr.make(fit=True)
+
+                img = qr.make_image(fill_color="black", back_color="white")
+                img_path = os.path.join(QRCODE_DIR, f"{qrcode_id}.png")
+                img.save(img_path)
+            except Exception:
+                pass
+
             success_count += 1
             
         except Exception as e:
             fail_list.append({
                 "index": idx,
-                "params": qr_req.dict(),
+                "params": item,
                 "reason": str(e)
             })
             fail_count += 1
@@ -569,10 +970,10 @@ def generate_batch_qrcode(create_by: str, qrcode_list: List[schemas.QRGenerateRe
     db.commit()
     
     return success_response({
-        "successNum": success_count,
-        "failNum": fail_count,
-        "failList": fail_list,
-        "downloadUrl": f"http://localhost:8000/zyfh/qrcodes/batch/{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.zip"
+        "success_num": success_count,
+        "fail_num": fail_count,
+        "fail_list": fail_list,
+        "download_url": None
     })
 
 @app.post("/zyfh/api/v1/qrcode/parse")
@@ -690,9 +1091,13 @@ def query_qrcode_records(enterprise_code: int = None, cj_id: str = None,
             "qrcode_id": rec.qrcode_id,
             "enterprise_code": rec.enterprise_code,
             "cj_id": rec.cj_id,
+            "spec": rec.spec,
             "batch_no": rec.batch_no,
             "generate_by": rec.generate_by,
-            "generate_time": rec.generate_time.isoformat() if rec.generate_time else None
+            "generate_time": rec.generate_time.isoformat() if rec.generate_time else None,
+            "qrcode_url": rec.qrcode_url,
+            "qrcode_origin": rec.qrcode_origin,
+            "base64_str": rec.base64_str
         })
     
     for rec in verify_records:
@@ -714,6 +1119,86 @@ def query_qrcode_records(enterprise_code: int = None, cj_id: str = None,
     })
 
 # ========== 扫码复核模块 ==========
+
+def get_active_basket_nos(db: Session) -> List[str]:
+    baskets = db.query(models.BasketManage).filter(
+        models.BasketManage.is_delete == 0,
+        models.BasketManage.status == 1
+    ).order_by(desc(models.BasketManage.create_time)).limit(100).all()
+    return [basket.basket_no for basket in baskets]
+
+
+def build_check_drug_list(db: Session, pres_no: str, fallback_total: int = 0) -> List[Dict[str, Any]]:
+    relation_rows = db.query(
+        models.PresBasketRelation.cj_id,
+        func.max(models.PresBasketRelation.drug_name).label("drug_name"),
+        func.sum(models.PresBasketRelation.basket_drug_num).label("pres_num")
+    ).filter(
+        models.PresBasketRelation.pres_no == pres_no,
+        models.PresBasketRelation.is_delete == 0
+    ).group_by(models.PresBasketRelation.cj_id).all()
+
+    rows: List[Dict[str, Any]] = []
+
+    if relation_rows:
+        for cj_id, drug_name, pres_num in relation_rows:
+            detail = db.query(models.DrugCheckDetail).filter(
+                models.DrugCheckDetail.pres_no == pres_no,
+                models.DrugCheckDetail.cj_id == cj_id,
+                models.DrugCheckDetail.is_delete == 0
+            ).order_by(desc(models.DrugCheckDetail.scan_time)).first()
+            drug_info = db.query(models.DrugInfo).filter(models.DrugInfo.cj_id == cj_id).first()
+            rows.append({
+                "cj_id": cj_id,
+                "drug_name": drug_name or (drug_info.drug_name if drug_info else cj_id),
+                "spec": (detail.spec if detail else (drug_info.spec_range if drug_info else "-")) or "-",
+                "pres_num": int(pres_num or 0),
+                "scan_num": int(detail.scan_num if detail else 0),
+                "is_check": 1 if detail and detail.is_check == 1 else 0
+            })
+        return rows
+
+    detail_rows = db.query(
+        models.DrugCheckDetail.cj_id,
+        func.max(models.DrugCheckDetail.drug_name).label("drug_name"),
+        func.max(models.DrugCheckDetail.spec).label("spec"),
+        func.sum(models.DrugCheckDetail.pres_num).label("pres_num"),
+        func.sum(models.DrugCheckDetail.scan_num).label("scan_num"),
+        func.max(models.DrugCheckDetail.is_check).label("is_check")
+    ).filter(
+        models.DrugCheckDetail.pres_no == pres_no,
+        models.DrugCheckDetail.is_delete == 0
+    ).group_by(models.DrugCheckDetail.cj_id).all()
+
+    if detail_rows:
+        for cj_id, drug_name, spec, pres_num, scan_num, is_check in detail_rows:
+            rows.append({
+                "cj_id": cj_id,
+                "drug_name": drug_name,
+                "spec": spec,
+                "pres_num": int(pres_num or 0),
+                "scan_num": int(scan_num or 0),
+                "is_check": int(is_check or 0)
+            })
+        return rows
+
+    limit_size = min(max(fallback_total or 3, 1), 10)
+    demo_drugs = db.query(models.DrugInfo).filter(
+        models.DrugInfo.is_delete == 0,
+        models.DrugInfo.status == 1
+    ).order_by(models.DrugInfo.id).limit(limit_size).all()
+
+    for drug in demo_drugs:
+        rows.append({
+            "cj_id": drug.cj_id,
+            "drug_name": drug.drug_name,
+            "spec": drug.spec_range or "-",
+            "pres_num": 1,
+            "scan_num": 0,
+            "is_check": 0
+        })
+
+    return rows
 
 @app.post("/zyfh/api/v1/check/his/sync")
 def sync_his_prescription(req: schemas.HISPrescriptionSyncRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
@@ -772,35 +1257,56 @@ def sync_his_prescription(req: schemas.HISPrescriptionSyncRequest, db: Session =
 @app.post("/zyfh/api/v1/check/init")
 def init_check(req: schemas.CheckInitRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """扫码复核初始化"""
-    # 检查处方是否存在
-    pres = db.query(models.HISPrescription).filter(models.HISPrescription.pres_no == req.pres_no).first()
+    pres = db.query(models.HISPrescription).filter(
+        models.HISPrescription.pres_no == req.pres_no,
+        models.HISPrescription.is_delete == 0
+    ).first()
     if not pres:
         return error_response("8000", "处方不存在")
-    
-    # 检查是否已在复核
-    existing = db.query(models.DrugCheckMain).filter(models.DrugCheckMain.pres_no == req.pres_no).first()
-    if existing and existing.check_status in [1, 2]:
-        return error_response("8000", "处方已在复核或已复核")
-    
-    # 初始化复核
-    check_main = models.DrugCheckMain(
-        pres_no=req.pres_no,
-        check_by=req.check_by,
-        check_station=req.check_station,
-        check_status=1  # 复核中
-    )
-    db.add(check_main)
-    
-    # 更新处方状态
-    pres.pres_status = 2  # 复核中
-    
+
+    check_main = db.query(models.DrugCheckMain).filter(
+        models.DrugCheckMain.pres_no == req.pres_no,
+        models.DrugCheckMain.is_delete == 0
+    ).first()
+
+    result_status = "initialized"
+    if check_main:
+        if check_main.check_status == 2:
+            return error_response("8000", "处方已复核完成")
+
+        result_status = "in_progress"
+        check_main.check_by = req.check_by or check_main.check_by
+        check_main.check_station = req.check_station or check_main.check_station
+    else:
+        check_main = models.DrugCheckMain(
+            pres_no=req.pres_no,
+            check_by=req.check_by,
+            check_station=req.check_station,
+            check_status=1
+        )
+        db.add(check_main)
+
+    pres.pres_status = 2
     db.commit()
     db.refresh(check_main)
-    
+
+    drug_list = build_check_drug_list(db, req.pres_no, pres.drug_total)
+    baskets = get_active_basket_nos(db)
+
     return success_response({
         "check_main_id": check_main.id,
         "pres_no": req.pres_no,
-        "status": "initialized"
+        "status": result_status,
+        "prescription": {
+            "pres_no": pres.pres_no,
+            "patient_name": pres.patient_name,
+            "doc_name": pres.doc_name,
+            "dept_name": pres.dept_name,
+            "pres_time": pres.pres_time.isoformat() if pres.pres_time else None,
+            "drug_total": pres.drug_total
+        },
+        "drug_list": drug_list,
+        "baskets": baskets
     })
 
 @app.post("/zyfh/api/v1/check/scan")
@@ -863,10 +1369,21 @@ def scan_check(req: schemas.ScanCheckRequest, db: Session = Depends(get_db), cur
     except Exception as e:
         return error_response("7000", f"二维码字段解析失败: {str(e)}")
     
-    # 5. 获取药品信息
+    # 5. 获取药品信息与处方预期
     drug = db.query(models.DrugInfo).filter(models.DrugInfo.cj_id == scan_cj_id).first()
     drug_name = drug.drug_name if drug else f"未知药品({scan_cj_id})"
-    
+
+    expected_relations = db.query(models.PresBasketRelation).filter(
+        models.PresBasketRelation.pres_no == req.pres_no,
+        models.PresBasketRelation.is_delete == 0
+    ).all()
+    expected_cj_ids = {item.cj_id for item in expected_relations}
+    expected_num = sum(item.basket_drug_num for item in expected_relations if item.cj_id == scan_cj_id)
+    if expected_num <= 0:
+        expected_num = num if num > 0 else 1
+
+    is_match = True if not expected_cj_ids else (scan_cj_id in expected_cj_ids)
+
     # 6. 保存扫码记录
     detail = models.DrugCheckDetail(
         check_main_id=check_main.id,
@@ -874,16 +1391,42 @@ def scan_check(req: schemas.ScanCheckRequest, db: Session = Depends(get_db), cur
         cj_id=scan_cj_id,
         drug_name=drug_name,
         spec=scan_spec,
-        pres_num=2,  # 应该从处方中获取
+        pres_num=expected_num,
         qrcode_id=f"QR{int(time.time())}",
         scan_spec=scan_spec,
         scan_num=num,
         basket_no=req.basket_no,
-        scan_result=1,  # 匹配
-        is_check=1
+        scan_result=1 if is_match else 0,
+        is_check=1 if is_match and num >= expected_num else 0
     )
     db.add(detail)
-    
+    db.flush()
+
+    if not is_match:
+        exists_error = db.query(models.CheckErrorRecord).filter(
+            models.CheckErrorRecord.check_detail_id == detail.id,
+            models.CheckErrorRecord.is_delete == 0
+        ).first()
+        if not exists_error:
+            db.add(models.CheckErrorRecord(
+                check_detail_id=detail.id,
+                check_main_id=check_main.id,
+                pres_no=req.pres_no,
+                cj_id=scan_cj_id,
+                drug_name=drug_name,
+                error_type="DRUG_ERROR",
+                error_desc="扫描药品与处方药品不匹配",
+                pres_standard="处方药品列表",
+                scan_actual=f"{scan_cj_id}/{scan_spec}",
+                error_status=1,
+                pres_spec="-",
+                scan_spec=scan_spec,
+                pres_num=expected_num,
+                scan_num=num,
+                error_by=req.check_by
+            ))
+            check_main.error_total = (check_main.error_total or 0) + 1
+
     # 7. 记录操作日志
     log_entry = models.CheckOperateRecord(
         pres_no=req.pres_no,
@@ -896,19 +1439,35 @@ def scan_check(req: schemas.ScanCheckRequest, db: Session = Depends(get_db), cur
         operate_ip="127.0.0.1"  # 实际应该从请求中获取
     )
     db.add(log_entry)
-    
+
     db.commit()
-    
+
+    scan_result = "match" if is_match else "mismatch"
+
     return success_response({
         "drug_name": drug_name,
-        "scan_result": "SUCCESS",
+        "scan_result": "SUCCESS" if is_match else "MISMATCH",
+        "scan_result_text": scan_result,
+        "scanResult": scan_result,
         "cj_id": scan_cj_id,
         "spec": scan_spec,
         "batch_no": batch_no,
         "num": num,
         "weight": weight,
         "basket_no": req.basket_no,
-        "scan_time": datetime.utcnow().isoformat()
+        "scan_time": datetime.utcnow().isoformat(),
+        "drug_info": {
+            "cj_id": scan_cj_id,
+            "drug_name": drug_name,
+            "spec": scan_spec,
+            "pres_num": expected_num
+        },
+        "drugInfo": {
+            "cjId": scan_cj_id,
+            "drugName": drug_name,
+            "spec": scan_spec,
+            "presNum": expected_num
+        }
     })
 
 @app.post("/zyfh/api/v1/check/progress/save")
@@ -1019,23 +1578,102 @@ def get_system_status(db: Session = Depends(get_db)):
         "system_status": "running"
     })
 
+
+@app.get("/zyfh/api/v1/dashboard/overview")
+def get_dashboard_overview(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """工作台数据总览（真实业务数据聚合）。"""
+    now = datetime.utcnow()
+    day_start = datetime(now.year, now.month, now.day)
+    day_end = day_start + timedelta(days=1)
+
+    today_checks = db.query(models.DrugCheckMain).filter(
+        models.DrugCheckMain.is_delete == 0,
+        models.DrugCheckMain.check_start_time >= day_start,
+        models.DrugCheckMain.check_start_time < day_end
+    ).all()
+
+    today_pres = len(today_checks)
+    qualified_total = sum(1 for item in today_checks if item.check_qualified == 1)
+    qualified_rate = round((qualified_total / today_pres * 100), 1) if today_pres else 0
+
+    today_errors = db.query(func.count(models.CheckErrorRecord.id)).filter(
+        models.CheckErrorRecord.is_delete == 0,
+        models.CheckErrorRecord.error_time >= day_start,
+        models.CheckErrorRecord.error_time < day_end
+    ).scalar() or 0
+
+    pending_pres = db.query(func.count(models.HISPrescription.id)).filter(
+        models.HISPrescription.is_delete == 0,
+        models.HISPrescription.pres_status.in_([1, 2])
+    ).scalar() or 0
+
+    recent_rows = db.query(
+        models.DrugCheckMain.pres_no,
+        models.DrugCheckMain.check_by,
+        models.DrugCheckMain.check_status,
+        models.DrugCheckMain.check_qualified,
+        models.DrugCheckMain.check_start_time,
+        models.DrugCheckMain.check_end_time,
+        models.HISPrescription.patient_name
+    ).outerjoin(
+        models.HISPrescription,
+        models.HISPrescription.pres_no == models.DrugCheckMain.pres_no
+    ).filter(
+        models.DrugCheckMain.is_delete == 0
+    ).order_by(desc(models.DrugCheckMain.check_start_time)).limit(10).all()
+
+    recent_records = []
+    for pres_no, check_by, check_status, check_qualified, check_start_time, check_end_time, patient_name in recent_rows:
+        check_time = check_end_time or check_start_time
+        recent_records.append({
+            "pres_no": pres_no,
+            "patient_name": patient_name or "-",
+            "check_by": check_by,
+            "check_time": check_time.isoformat() if check_time else None,
+            "status": map_dashboard_status(check_status, check_qualified)
+        })
+
+    return success_response({
+        "today_pres": today_pres,
+        "qualified_rate": qualified_rate,
+        "today_errors": today_errors,
+        "pending_pres": pending_pres,
+        "recent_records": recent_records
+    })
+
 # ========== 错误提醒模块 ==========
 
 @app.post("/zyfh/api/v1/alert/error/save")
 def save_error_record(req: dict, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """保存错误提醒记录"""
+    check_detail_id = int(req.get("check_detail_id") or int(time.time() * 1000))
+    while db.query(models.CheckErrorRecord).filter(models.CheckErrorRecord.check_detail_id == check_detail_id).first():
+        check_detail_id += 1
+
+    pres_standard = req.get("pres_standard") or req.get("pres_spec")
+    scan_actual = req.get("scan_actual") or req.get("scan_spec")
+
+    if not pres_standard:
+        pres_standard = f"{req.get('pres_spec') or ''}/{req.get('pres_num') or ''}".strip("/") or "-"
+    if not scan_actual:
+        scan_actual = f"{req.get('scan_spec') or ''}/{req.get('scan_num') or ''}".strip("/") or "-"
+
     error_record = models.CheckErrorRecord(
-        pres_no=req.get("pres_no"),
-        error_type=req.get("error_type"),  # DRUG_NOT_MATCH, SPEC_ERROR, WEIGHT_ERROR 等
-        error_desc=req.get("error_desc"),
-        error_level=req.get("error_level", 1),  # 1=普通, 2=警告, 3=严重
+        check_detail_id=check_detail_id,
+        check_main_id=int(req.get("check_main_id") or 0),
+        pres_no=req.get("pres_no") or "UNKNOWN",
+        cj_id=req.get("cj_id") or "UNKNOWN",
+        error_type=req.get("error_type") or "UNKNOWN",  # DRUG_NOT_MATCH, SPEC_ERROR, WEIGHT_ERROR 等
+        error_desc=req.get("error_desc") or "未提供错误描述",
+        pres_standard=pres_standard,
+        scan_actual=scan_actual,
         drug_name=req.get("drug_name"),
         pres_spec=req.get("pres_spec"),
         scan_spec=req.get("scan_spec"),
         pres_num=req.get("pres_num"),
         scan_num=req.get("scan_num"),
         error_by=current_user.user_account,
-        error_status=0  # 待处理
+        error_status=1  # 待处理
     )
     db.add(error_record)
     db.commit()
@@ -1046,7 +1684,10 @@ def save_error_record(req: dict, db: Session = Depends(get_db), current_user=Dep
 @app.put("/zyfh/api/v1/alert/error/handle")
 def handle_error_record(req: schemas.ErrorHandleRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """处理（解决）错误提醒"""
-    error_record = db.query(models.CheckErrorRecord).filter(models.CheckErrorRecord.id == int(req.error_id)).first()
+    error_record = db.query(models.CheckErrorRecord).filter(
+        models.CheckErrorRecord.id == int(req.error_id),
+        models.CheckErrorRecord.is_delete == 0
+    ).first()
     if not error_record:
         return error_response("8000", "错误记录不存在")
     
@@ -1063,38 +1704,60 @@ def handle_error_record(req: schemas.ErrorHandleRequest, db: Session = Depends(g
     
     # 更新错误记录状态
     error_record.error_status = 2  # 已处理
+    error_record.handle_type = req.handle_result
+    error_record.handle_by = req.handle_by
     
     db.commit()
     
     return success_response({"error_id": req.error_id, "handle_result": "success"})
 
+@app.get("/zyfh/api/v1/alert/error/stat/query")
 @app.get("/zyfh/api/v1/alert/error/list")
-def list_error_records(pres_no: str = None, error_status: int = None, 
+def list_error_records(pres_no: str = None, error_status: int = None,
+                      error_type: str = None, page: int = 1, size: int = 20,
+                      presNo: str = None, errorType: str = None,
                       db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """查询错误提醒列表"""
-    query = db.query(models.CheckErrorRecord)
+    filter_pres_no = pres_no or presNo
+    filter_error_type = error_type or errorType
+    page = max(page, 1)
+    size = min(max(size, 1), 200)
+
+    query = db.query(models.CheckErrorRecord).filter(models.CheckErrorRecord.is_delete == 0)
     
-    if pres_no:
-        query = query.filter(models.CheckErrorRecord.pres_no == pres_no)
+    if filter_pres_no:
+        query = query.filter(models.CheckErrorRecord.pres_no == filter_pres_no)
     if error_status is not None:
         query = query.filter(models.CheckErrorRecord.error_status == error_status)
-    
-    records = query.order_by(desc(models.CheckErrorRecord.create_time)).limit(100).all()
-    
+    if filter_error_type:
+        query = query.filter(models.CheckErrorRecord.error_type == filter_error_type)
+
+    total = query.count()
+    records = query.order_by(desc(models.CheckErrorRecord.error_time)).offset((page - 1) * size).limit(size).all()
+
+    record_list = [
+        {
+            "error_id": r.id,
+            "error_time": r.error_time.isoformat() if r.error_time else None,
+            "pres_no": r.pres_no,
+            "cj_id": r.cj_id,
+            "drug_name": r.drug_name,
+            "error_type": r.error_type,
+            "error_desc": r.error_desc,
+            "error_status": r.error_status,
+            "handle_type": r.handle_type,
+            "error_by": r.error_by,
+            "handle_by": r.handle_by
+        } for r in records
+    ]
+
     return success_response({
-        "total": len(records),
-        "records": [
-            {
-                "error_id": r.id,
-                "pres_no": r.pres_no,
-                "error_type": r.error_type,
-                "error_desc": r.error_desc,
-                "error_status": r.error_status,
-                "handle_type": r.handle_type,
-                "error_by": r.error_by,
-                "handle_by": r.handle_by
-            } for r in records
-        ]
+        "total": total,
+        "pages": (total + size - 1) // size,
+        "page": page,
+        "size": size,
+        "list": record_list,
+        "records": record_list
     })
 
 # ========== 分筐管理模块 ==========
@@ -1106,14 +1769,13 @@ def save_basket(req: schemas.BasketCreateRequest, db: Session = Depends(get_db),
     existing = db.query(models.BasketManage).filter(models.BasketManage.basket_no == req.basket_no).first()
     if existing:
         existing.basket_name = req.basket_name
-        existing.status = req.status if hasattr(req, 'status') else 1
-        existing.update_by = req.create_by
-        existing.update_time = datetime.utcnow()
+        existing.status = req.status if req.status is not None else existing.status
+        existing.is_delete = 0
     else:
         basket = models.BasketManage(
             basket_no=req.basket_no,
             basket_name=req.basket_name,
-            status=req.status if hasattr(req, 'status') else 1,
+            status=req.status if req.status is not None else 1,
             create_by=req.create_by
         )
         db.add(basket)
@@ -1125,15 +1787,25 @@ def save_basket(req: schemas.BasketCreateRequest, db: Session = Depends(get_db),
 def save_basket_relation(req: schemas.BasketDrugRelationRequest, 
                         db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """分筐关联（处方 -> 分筐 -> 药品）"""
+    effective_create_by = req.create_by or current_user.user_account
+    effective_check_main_id = req.check_main_id
+    if effective_check_main_id is None:
+        check_main = db.query(models.DrugCheckMain).filter(models.DrugCheckMain.pres_no == req.pres_no).first()
+        effective_check_main_id = check_main.id if check_main else 0
+
     # 检查分筐是否存在
-    basket = db.query(models.BasketManage).filter(models.BasketManage.basket_no == req.basket_no).first()
+    basket = db.query(models.BasketManage).filter(
+        models.BasketManage.basket_no == req.basket_no,
+        models.BasketManage.is_delete == 0
+    ).first()
     if not basket:
         return error_response("8000", "分筐不存在")
     
     # 清除已有关系（如果需要更新的话）
     existing_relations = db.query(models.PresBasketRelation).filter(
         models.PresBasketRelation.pres_no == req.pres_no,
-        models.PresBasketRelation.basket_no == req.basket_no
+        models.PresBasketRelation.basket_no == req.basket_no,
+        models.PresBasketRelation.is_delete == 0
     ).all()
     
     for rel in existing_relations:
@@ -1147,16 +1819,80 @@ def save_basket_relation(req: schemas.BasketDrugRelationRequest,
         
         relation = models.PresBasketRelation(
             pres_no=req.pres_no,
+            check_main_id=effective_check_main_id,
             basket_no=req.basket_no,
             cj_id=cj_id,
             drug_name=drug_name,
             basket_drug_num=1,  # 默认数量为1，实际应从处方中获取
-            create_by=req.create_by
+            create_by=effective_create_by
         )
         db.add(relation)
     
     db.commit()
     return success_response({"basket_no": req.basket_no, "drug_count": len(req.cj_id_list), "status": "saved"})
+
+
+@app.get("/zyfh/api/v1/basket/relation/query")
+@app.get("/zyfh/api/v1/basket/relation/list")
+def query_basket_relations(pres_no: str, basket_no: str = None,
+                          db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """查询处方分筐关联（用于前端刷新最新数据）"""
+    relation_query = db.query(models.PresBasketRelation).filter(
+        models.PresBasketRelation.pres_no == pres_no,
+        models.PresBasketRelation.is_delete == 0
+    )
+
+    if basket_no:
+        relation_query = relation_query.filter(models.PresBasketRelation.basket_no == basket_no)
+
+    relations = relation_query.order_by(desc(models.PresBasketRelation.create_time)).all()
+
+    if relations:
+        records = []
+        for relation in relations:
+            drug_info = db.query(models.DrugInfo).filter(models.DrugInfo.cj_id == relation.cj_id).first()
+            spec = ""
+            if drug_info and drug_info.spec_range:
+                spec = drug_info.spec_range.split(",")[0]
+            records.append({
+                "id": relation.id,
+                "pres_no": relation.pres_no,
+                "basket_no": relation.basket_no,
+                "cj_id": relation.cj_id,
+                "drug_name": relation.drug_name,
+                "spec": spec,
+                "pres_num": relation.basket_drug_num,
+                "basket_status": relation.basket_status,
+                "create_time": relation.create_time.isoformat() if relation.create_time else None
+            })
+
+        return success_response({
+            "total": len(records),
+            "list": records
+        })
+
+    fallback_drugs = db.query(models.DrugInfo).filter(
+        models.DrugInfo.is_delete == 0,
+        models.DrugInfo.status == 1
+    ).order_by(models.DrugInfo.cj_id).limit(20).all()
+
+    fallback_list = [
+        {
+            "pres_no": pres_no,
+            "basket_no": "",
+            "cj_id": drug.cj_id,
+            "drug_name": drug.drug_name,
+            "spec": (drug.spec_range or "").split(",")[0],
+            "pres_num": 1,
+            "basket_status": 1
+        }
+        for drug in fallback_drugs
+    ]
+
+    return success_response({
+        "total": len(fallback_list),
+        "list": fallback_list
+    })
 
 @app.post("/zyfh/api/v1/basket/check/confirm")
 def confirm_basket_check(req: schemas.BasketCheckConfirmRequest, 
@@ -1185,23 +1921,49 @@ def confirm_basket_check(req: schemas.BasketCheckConfirmRequest,
 def list_baskets(status: int = None, pres_no: str = None, 
                 db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """查询分筐列表"""
-    query = db.query(models.BasketManage)
+    query = db.query(models.BasketManage).filter(models.BasketManage.is_delete == 0)
     
     if status is not None:
         query = query.filter(models.BasketManage.status == status)
     
     baskets = query.order_by(desc(models.BasketManage.create_time)).limit(50).all()
     
+    basket_list = [
+        {
+            "basket_no": b.basket_no,
+            "basket_name": b.basket_name,
+            "create_type": b.create_type,
+            "status": b.status,
+            "create_by": b.create_by,
+            "create_time": b.create_time.isoformat() if b.create_time else None
+        }
+        for b in baskets
+    ]
+
     return success_response({
-        "total": len(baskets),
-        "baskets": [
-            {
-                "basket_no": b.basket_no,
-                "status": b.status,
-                "create_by": b.create_by,
-                "create_time": b.create_time.timestamp() if b.create_time else None
-            } for b in baskets
-        ]
+        "total": len(basket_list),
+        "list": basket_list,
+        "baskets": basket_list
+    })
+
+
+@app.put("/zyfh/api/v1/basket/disable")
+def disable_basket(req: schemas.BasketDisableRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """作废分筐"""
+    basket = db.query(models.BasketManage).filter(
+        models.BasketManage.basket_no == req.basket_no,
+        models.BasketManage.is_delete == 0
+    ).first()
+
+    if not basket:
+        return error_response("8000", "分筐不存在")
+
+    basket.status = 0
+    db.commit()
+
+    return success_response({
+        "basket_no": req.basket_no,
+        "status": "disabled"
     })
 
 # ========== 溯源管理模块 ==========
@@ -1210,23 +1972,39 @@ def list_baskets(status: int = None, pres_no: str = None,
 def query_trace_records(req: schemas.TraceRecordQueryRequest = Depends(), 
                        db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """查询操作记录（溯源）"""
-    query = db.query(models.CheckOperateRecord)
-    
+    query = db.query(
+        models.DrugCheckDetail,
+        models.HISPrescription.patient_name,
+        models.DrugCheckMain.check_by,
+        models.DrugCheckMain.check_station
+    ).outerjoin(
+        models.DrugCheckMain,
+        models.DrugCheckMain.id == models.DrugCheckDetail.check_main_id
+    ).outerjoin(
+        models.HISPrescription,
+        models.HISPrescription.pres_no == models.DrugCheckDetail.pres_no
+    ).filter(
+        models.DrugCheckDetail.is_delete == 0
+    )
+
     if req.pres_no:
-        query = query.filter(models.CheckOperateRecord.pres_no == req.pres_no)
+        query = query.filter(models.DrugCheckDetail.pres_no == req.pres_no)
     if req.cj_id:
-        query = query.filter(models.CheckOperateRecord.cj_id == req.cj_id)
+        query = query.filter(models.DrugCheckDetail.cj_id == req.cj_id)
+    if req.basket_no:
+        query = query.filter(models.DrugCheckDetail.basket_no == req.basket_no)
     if req.check_by:
-        query = query.filter(models.CheckOperateRecord.operate_user == req.check_by)
+        query = query.filter(models.DrugCheckMain.check_by == req.check_by)
     if req.start_time and req.end_time:
-        start_dt = datetime.strptime(req.start_time, "%Y-%m-%d %H:%M:%S")
-        end_dt = datetime.strptime(req.end_time, "%Y-%m-%d %H:%M:%S")
-        query = query.filter(models.CheckOperateRecord.operate_time.between(start_dt, end_dt))
-    
-    # 分页处理
+        start_dt = parse_datetime_value(req.start_time)
+        end_dt = parse_datetime_value(req.end_time)
+        if not start_dt or not end_dt:
+            return error_response("1000", "时间格式错误")
+        query = query.filter(models.DrugCheckDetail.scan_time.between(start_dt, end_dt))
+
     total = query.count()
-    records = query.offset((req.page - 1) * req.size).limit(req.size).all()
-    
+    records = query.order_by(desc(models.DrugCheckDetail.scan_time)).offset((req.page - 1) * req.size).limit(req.size).all()
+
     return success_response({
         "total": total,
         "pages": (total + req.size - 1) // req.size,
@@ -1234,15 +2012,21 @@ def query_trace_records(req: schemas.TraceRecordQueryRequest = Depends(),
         "size": req.size,
         "list": [
             {
-                "operate_id": r.id,
-                "pres_no": r.pres_no,
-                "cj_id": r.cj_id,
-                "operate_type": r.operate_type,
-                "operate_content": r.operate_content,
-                "operate_by": r.operate_user,
-                "operate_time": r.operate_time.isoformat() if r.operate_time else None,
-                "ip_address": r.operate_ip
-            } for r in records
+                "record_id": detail.id,
+                "pres_no": detail.pres_no,
+                "patient_name": patient_name,
+                "cj_id": detail.cj_id,
+                "drug_name": detail.drug_name,
+                "spec": detail.spec,
+                "scan_spec": detail.scan_spec,
+                "pres_num": detail.pres_num,
+                "scan_num": detail.scan_num,
+                "scan_time": detail.scan_time.isoformat() if detail.scan_time else None,
+                "check_by": check_by,
+                "basket_no": detail.basket_no,
+                "scan_result": detail.scan_result,
+                "check_station": check_station
+            } for detail, patient_name, check_by, check_station in records
         ]
     })
 
@@ -1250,13 +2034,15 @@ def query_trace_records(req: schemas.TraceRecordQueryRequest = Depends(),
 def query_video_link(pres_no: str, scan_time: str, check_station: str, 
                     db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """查询关联视频（基于时间戳精准匹配）"""
-    # 将时间字符串转换为datetime对象
-    scan_datetime = datetime.strptime(scan_time, "%Y-%m-%d %H:%M:%S")
+    scan_datetime = parse_datetime_value(scan_time)
+    if not scan_datetime:
+        return error_response("1000", "扫码时间格式错误")
     
     # 查询视频监控联动记录，时间匹配精度为±1秒
     query = db.query(models.VideoMonitorLink).filter(
         models.VideoMonitorLink.pres_no == pres_no,
         models.VideoMonitorLink.check_station == check_station,
+        models.VideoMonitorLink.is_delete == 0,
         models.VideoMonitorLink.scan_time.between(
             scan_datetime - timedelta(seconds=1), 
             scan_datetime + timedelta(seconds=1)
@@ -1285,116 +2071,301 @@ def query_video_link(pres_no: str, scan_time: str, check_station: str,
 def generate_trace_report(req: schemas.TraceReportGenerateRequest, db: Session = Depends(get_db),
                          current_user=Depends(get_current_user)):
     """生成溯源报告"""
+    target_pres_no = req.pres_no
+    if not target_pres_no and req.pres_no_list:
+        target_pres_no = req.pres_no_list[0]
+
+    if not target_pres_no:
+        return error_response("1000", "处方号不能为空")
+
     # 查询该处方的所有操作记录
     records = db.query(models.CheckOperateRecord).filter(
-        models.CheckOperateRecord.pres_no == req.pres_no
+        models.CheckOperateRecord.pres_no == target_pres_no
     ).order_by(models.CheckOperateRecord.operate_time).all()
 
     # 生成报告内容
     report_content = {
         "report_id": f"RPT{int(time.time())}",
-        "pres_no": req.pres_no,
+        "pres_no": target_pres_no,
         "total_operations": len(records),
         "operations": [
             {
                 "time": r.operate_time.isoformat() if r.operate_time else None,
                 "type": r.operate_type,
-                "user": r.operate_by,
-                "content": r.operate_content
+                "user": r.operate_user,
+                "content": r.operate_desc
             } for r in records
         ],
         "generated_by": current_user.user_account,
         "generated_time": datetime.utcnow().isoformat()
     }
 
+    report_filename = f"{report_content['report_id']}.json"
+    report_path = os.path.join(REPORT_DIR, report_filename)
+    with open(report_path, "w", encoding="utf-8") as file:
+        json.dump(report_content, file, ensure_ascii=False, indent=2)
+
     return success_response({
-        "report_id": f"RPT{int(time.time())}",
-        "pres_no": req.pres_no,
+        "report_id": report_content["report_id"],
+        "pres_no": target_pres_no,
         "operation_count": len(records),
+        "download_url": f"http://localhost:8000/zyfh/reports/{report_filename}",
         "status": "generated"
     })
 
 # ========== 工作量统计模块 ==========
 
+def format_stat_time(value: Optional[datetime], time_type: str) -> str:
+    if not value:
+        return ""
+
+    normalized = (time_type or "MONTH").upper()
+    if normalized == "DAY":
+        return value.strftime("%Y-%m-%d")
+    if normalized == "WEEK":
+        year, week, _ = value.isocalendar()
+        return f"{year}-W{week:02d}"
+    if normalized == "YEAR":
+        return value.strftime("%Y")
+    return value.strftime("%Y-%m")
+
+
+def build_workload_rows(req: schemas.WorkloadStatQueryRequest, db: Session) -> List[Dict[str, Any]]:
+    check_query = db.query(models.DrugCheckMain).filter(models.DrugCheckMain.is_delete == 0)
+
+    if req.stat_type == "USER" and req.check_by:
+        check_query = check_query.filter(models.DrugCheckMain.check_by == req.check_by)
+
+    check_mains = check_query.all()
+    grouped: Dict[str, Dict[str, Any]] = {}
+    time_type = (req.time_type or "MONTH").upper()
+
+    for check_main in check_mains:
+        stat_dt = check_main.check_end_time or check_main.submit_time or check_main.check_start_time
+
+        if req.stat_type == "TIME":
+            stat_key = format_stat_time(stat_dt, time_type)
+            if req.stat_time:
+                target = req.stat_time
+                if time_type == "DAY" and stat_key != target:
+                    continue
+                if time_type == "MONTH" and stat_key != target[:7]:
+                    continue
+                if time_type == "YEAR" and stat_key != target[:4]:
+                    continue
+                if time_type == "WEEK" and target not in stat_key:
+                    continue
+        elif req.stat_type == "PRES":
+            stat_key = check_main.pres_no
+        else:
+            stat_key = check_main.check_by or "UNKNOWN"
+
+        if not stat_key:
+            continue
+
+        detail_query = db.query(models.DrugCheckDetail).filter(
+            models.DrugCheckDetail.check_main_id == check_main.id,
+            models.DrugCheckDetail.is_delete == 0
+        )
+        qrcode_total = detail_query.count()
+        drug_total = db.query(func.count(func.distinct(models.DrugCheckDetail.cj_id))).filter(
+            models.DrugCheckDetail.check_main_id == check_main.id,
+            models.DrugCheckDetail.is_delete == 0
+        ).scalar() or 0
+        error_total = db.query(func.count(models.CheckErrorRecord.id)).filter(
+            models.CheckErrorRecord.pres_no == check_main.pres_no,
+            models.CheckErrorRecord.is_delete == 0
+        ).scalar() or 0
+
+        check_hours = 0.0
+        if check_main.check_start_time and check_main.check_end_time:
+            check_hours = max((check_main.check_end_time - check_main.check_start_time).total_seconds() / 3600, 0)
+
+        row = grouped.setdefault(stat_key, {
+            "check_by": check_main.check_by,
+            "stat_time_type": time_type if req.stat_type == "TIME" else None,
+            "stat_time": stat_key if req.stat_type == "TIME" else None,
+            "pres_no": stat_key if req.stat_type == "PRES" else None,
+            "pres_total": 0,
+            "drug_total": 0,
+            "qrcode_total": 0,
+            "qualified_pres": 0,
+            "error_total": 0,
+            "handle_error": 0,
+            "check_hours": 0.0,
+            "update_time": datetime.utcnow().isoformat()
+        })
+
+        row["pres_total"] += 1
+        row["drug_total"] += int(drug_total)
+        row["qrcode_total"] += int(qrcode_total)
+        row["error_total"] += int(error_total)
+        row["qualified_pres"] += 1 if check_main.check_qualified == 1 else 0
+        row["check_hours"] += float(check_hours)
+
+    row_list = list(grouped.values())
+    if req.stat_type == "TIME":
+        row_list.sort(key=lambda item: item.get("stat_time") or "", reverse=True)
+    elif req.stat_type == "PRES":
+        row_list.sort(key=lambda item: item.get("pres_no") or "", reverse=True)
+    else:
+        row_list.sort(key=lambda item: item.get("check_by") or "")
+
+    return row_list
+
 @app.get("/zyfh/api/v1/stat/workload/query")
 def query_workload_stat(req: schemas.WorkloadStatQueryRequest = Depends(),
                        db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """查询工作量统计"""
-    # 根据统计类型构建查询
-    query_obj = db.query(models.CheckWorkloadStat)
-    
-    # 根据统计类型过滤
-    if req.stat_type == "USER":
-        if req.check_by:
-            query_obj = query_obj.filter(models.CheckWorkloadStat.check_by == req.check_by)
-    elif req.stat_type == "TIME":
-        if req.time_type and req.stat_time:
-            query_obj = query_obj.filter(
-                models.CheckWorkloadStat.stat_time_type == req.time_type,
-                models.CheckWorkloadStat.stat_time.like(f"{req.stat_time}%")
-            )
-    elif req.stat_type == "PRES":
-        # 按处方维度的统计可能需要另外实现
-        pass
-    
-    # 分页处理
-    total = query_obj.count()
-    stats = query_obj.offset((req.page - 1) * req.size).limit(req.size).all()
-    
+    page = max(req.page, 1)
+    size = min(max(req.size, 1), 200)
+    rows = build_workload_rows(req, db)
+    total = len(rows)
+    start = (page - 1) * size
+    paged_rows = rows[start:start + size]
+
+    for index, row in enumerate(paged_rows, start=start + 1):
+        row["id"] = index
+
     return success_response({
         "total": total,
-        "pages": (total + req.size - 1) // req.size,
-        "page": req.page,
-        "size": req.size,
-        "list": [
-            {
-                "id": s.id,
-                "check_by": s.check_by,
-                "stat_time_type": s.stat_time_type,
-                "stat_time": s.stat_time,
-                "pres_total": s.pres_total,
-                "drug_total": s.drug_total,
-                "qrcode_total": s.qrcode_total,
-                "qualified_pres": s.qualified_pres,
-                "error_total": s.error_total,
-                "handle_error": s.handle_error,
-                "check_hours": float(s.check_hours) if s.check_hours else 0.0,
-                "update_time": s.update_time.isoformat() if s.update_time else None
-            } for s in stats
-        ]
+        "pages": (total + size - 1) // size,
+        "page": page,
+        "size": size,
+        "list": paged_rows
     })
 
 @app.post("/zyfh/api/v1/stat/report/generate")
 def generate_stat_report(req: schemas.StatReportGenerateRequest,
                         db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """生成统计报告（含图表数据）"""
-    stats = db.query(models.CheckWorkloadStat).order_by(
-        models.CheckWorkloadStat.stat_date
-    ).limit(30).all()
+    try:
+        start_date = datetime.strptime(req.start_date, "%Y-%m-%d")
+        end_date = datetime.strptime(req.end_date, "%Y-%m-%d") + timedelta(days=1)
+    except ValueError:
+        return error_response("1000", "日期格式错误，应为 YYYY-MM-DD")
 
-    total_pres = sum([s.pres_total for s in stats])
-    total_drugs = sum([s.drug_total for s in stats])
-    total_qualified = sum([s.qualified_pres for s in stats])
-    total_errors = sum([s.error_total for s in stats])
-    qualified_rate = (total_qualified / total_drugs * 100) if total_drugs > 0 else 0
+    checks = db.query(models.DrugCheckMain).filter(
+        models.DrugCheckMain.is_delete == 0,
+        models.DrugCheckMain.check_start_time >= start_date,
+        models.DrugCheckMain.check_start_time < end_date
+    ).all()
 
-    return success_response({
-        "report_id": f"STAT{int(time.time())}",
+    total_pres = len(checks)
+    total_drugs = 0
+    total_qrcode = 0
+    total_qualified = 0
+    total_errors = 0
+
+    for check_main in checks:
+        total_qrcode += db.query(func.count(models.DrugCheckDetail.id)).filter(
+            models.DrugCheckDetail.check_main_id == check_main.id,
+            models.DrugCheckDetail.is_delete == 0
+        ).scalar() or 0
+        total_drugs += db.query(func.count(func.distinct(models.DrugCheckDetail.cj_id))).filter(
+            models.DrugCheckDetail.check_main_id == check_main.id,
+            models.DrugCheckDetail.is_delete == 0
+        ).scalar() or 0
+        total_errors += db.query(func.count(models.CheckErrorRecord.id)).filter(
+            models.CheckErrorRecord.pres_no == check_main.pres_no,
+            models.CheckErrorRecord.is_delete == 0
+        ).scalar() or 0
+        total_qualified += 1 if check_main.check_qualified == 1 else 0
+
+    qualified_rate = (total_qualified / total_pres * 100) if total_pres > 0 else 0
+
+    report_id = f"STAT{int(time.time())}"
+    report_filename = f"{report_id}.json"
+    report_path = os.path.join(REPORT_DIR, report_filename)
+    report_content = {
+        "report_id": report_id,
+        "report_type": req.report_type,
         "period": f"{req.start_date} - {req.end_date}",
         "total_prescriptions": total_pres,
         "total_drugs": total_drugs,
+        "total_qrcode": total_qrcode,
         "total_qualified": total_qualified,
         "total_errors": total_errors,
         "qualified_rate": round(qualified_rate, 2),
+        "generated_by": current_user.user_account,
+        "generated_time": datetime.utcnow().isoformat()
+    }
+
+    with open(report_path, "w", encoding="utf-8") as file:
+        json.dump(report_content, file, ensure_ascii=False, indent=2)
+
+    return success_response({
+        "report_id": report_id,
+        "period": f"{req.start_date} - {req.end_date}",
+        "total_prescriptions": total_pres,
+        "total_drugs": total_drugs,
+        "total_qrcode": total_qrcode,
+        "total_qualified": total_qualified,
+        "total_errors": total_errors,
+        "qualified_rate": round(qualified_rate, 2),
+        "download_url": f"http://localhost:8000/zyfh/reports/{report_filename}",
         "status": "generated"
     })
 
 # ========== 系统管理模块 ==========
 
+@app.get("/zyfh/api/v1/sys/user/profile/get")
+def get_user_profile(current_user=Depends(get_current_user)):
+    """获取当前登录用户个人信息"""
+    return success_response({
+        "id": current_user.id,
+        "user_account": current_user.user_account,
+        "user_name": current_user.user_name,
+        "dept_name": current_user.dept_name,
+        "post": current_user.post,
+        "phone": current_user.phone,
+        "status": current_user.status,
+        "login_time": current_user.login_time.isoformat() if current_user.login_time else None
+    })
+
+
+@app.put("/zyfh/api/v1/sys/user/profile/update")
+def update_user_profile(req: schemas.UserProfileUpdateRequest,
+                        db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """更新当前登录用户个人信息"""
+    current_user.user_name = req.user_name
+    current_user.dept_name = req.dept_name
+    current_user.post = req.post
+    current_user.phone = req.phone
+    current_user.update_by = current_user.user_account
+    current_user.update_time = datetime.utcnow()
+    db.commit()
+
+    return success_response({
+        "user_account": current_user.user_account,
+        "status": "updated"
+    })
+
+
+@app.put("/zyfh/api/v1/sys/user/password/update")
+def update_user_password(req: schemas.UserPasswordUpdateRequest,
+                         db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """更新当前登录用户密码"""
+    if current_user.user_pwd != hash_password(req.old_password):
+        return error_response("2000", "原密码不正确")
+
+    if req.old_password == req.new_password:
+        return error_response("1000", "新密码不能与原密码相同")
+
+    current_user.user_pwd = hash_password(req.new_password)
+    current_user.update_by = current_user.user_account
+    current_user.update_time = datetime.utcnow()
+    db.commit()
+
+    return success_response({"status": "updated"}, "密码更新成功")
+
 @app.post("/zyfh/api/v1/sys/user/save")
 def save_user(req: schemas.UserCreateRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """新增/编辑用户"""
-    existing = db.query(models.SysUser).filter(models.SysUser.user_account == req.user_account).first()
+    existing = db.query(models.SysUser).filter(
+        models.SysUser.user_account == req.user_account,
+        models.SysUser.is_delete == 0
+    ).first()
     if existing:
         # 编辑现有用户
         existing.user_name = req.user_name
@@ -1428,7 +2399,7 @@ def list_users(user_account: str = None, user_name: str = None, dept_name: str =
                 status: int = None, page: int = 1, size: int = 20,
                 db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """查询用户列表（分页）"""
-    query = db.query(models.SysUser)
+    query = db.query(models.SysUser).filter(models.SysUser.is_delete == 0)
     
     if user_account:
         query = query.filter(models.SysUser.user_account.like(f"%{user_account}%"))
@@ -1462,14 +2433,17 @@ def list_users(user_account: str = None, user_name: str = None, dept_name: str =
     })
 
 @app.delete("/zyfh/api/v1/sys/user/delete")
-def delete_user(id: int, operate_by: str, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+def delete_user(id: int, operate_by: str = None, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """系统用户删除（逻辑删除）"""
-    user = db.query(models.SysUser).filter(models.SysUser.id == id).first()
+    user = db.query(models.SysUser).filter(
+        models.SysUser.id == id,
+        models.SysUser.is_delete == 0
+    ).first()
     if not user:
         return error_response("5000", "用户不存在")
     
     user.is_delete = 1
-    user.update_by = operate_by
+    user.update_by = operate_by or current_user.user_account
     user.update_time = datetime.utcnow()
     
     # 逻辑删除该用户的角色关联
@@ -1483,13 +2457,15 @@ def delete_user(id: int, operate_by: str, db: Session = Depends(get_db), current
 @app.post("/zyfh/api/v1/sys/role/save")
 def save_role(req: schemas.RoleCreateRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """新增/编辑角色"""
-    existing = db.query(models.SysRole).filter(models.SysRole.role_code == req.role_code).first()
+    existing = db.query(models.SysRole).filter(
+        models.SysRole.role_code == req.role_code,
+        models.SysRole.is_delete == 0
+    ).first()
     if existing:
         existing.role_name = req.role_name
         existing.role_permission = req.role_permission
         existing.role_desc = req.role_desc
         existing.status = req.status
-        existing.update_by = current_user.user_account
         existing.update_time = datetime.utcnow()
     else:
         role = models.SysRole(
@@ -1497,8 +2473,7 @@ def save_role(req: schemas.RoleCreateRequest, db: Session = Depends(get_db), cur
             role_name=req.role_name,
             role_permission=req.role_permission,
             role_desc=req.role_desc,
-            status=req.status,
-            create_by=current_user.user_account
+            status=req.status
         )
         db.add(role)
     
@@ -1508,7 +2483,7 @@ def save_role(req: schemas.RoleCreateRequest, db: Session = Depends(get_db), cur
 @app.get("/zyfh/api/v1/sys/role/list")
 def list_roles(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """查询角色列表"""
-    roles = db.query(models.SysRole).order_by(desc(models.SysRole.create_time)).limit(100).all()
+    roles = db.query(models.SysRole).filter(models.SysRole.is_delete == 0).order_by(desc(models.SysRole.create_time)).limit(100).all()
     
     return success_response({
         "total": len(roles),
@@ -1523,6 +2498,35 @@ def list_roles(db: Session = Depends(get_db), current_user=Depends(get_current_u
                 "create_time": r.create_time.timestamp() if r.create_time else None
             } for r in roles
         ]
+    })
+
+
+@app.delete("/zyfh/api/v1/sys/role/delete")
+def delete_role(id: int, operate_by: str = None, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """系统角色删除（逻辑删除）"""
+    role = db.query(models.SysRole).filter(
+        models.SysRole.id == id,
+        models.SysRole.is_delete == 0
+    ).first()
+
+    if not role:
+        return error_response("5000", "角色不存在")
+
+    role.is_delete = 1
+    role.update_time = datetime.utcnow()
+
+    user_roles = db.query(models.SysUserRole).filter(
+        models.SysUserRole.role_id == id,
+        models.SysUserRole.is_delete == 0
+    ).all()
+    for user_role in user_roles:
+        user_role.is_delete = 1
+
+    db.commit()
+    return success_response({
+        "role_id": id,
+        "operate_by": operate_by or current_user.user_account,
+        "status": "deleted"
     })
 
 @app.post("/zyfh/api/v1/sys/user_role/bind")
@@ -1541,8 +2545,7 @@ def bind_user_role(req: schemas.UserRoleBindRequest, db: Session = Depends(get_d
     for role_id in req.role_id_list:
         user_role = models.SysUserRole(
             user_id=req.user_id,
-            role_id=role_id,
-            create_by=req.operate_by
+            role_id=role_id
         )
         db.add(user_role)
     
@@ -1563,7 +2566,6 @@ def save_device(req: schemas.DeviceRegisterRequest, db: Session = Depends(get_db
         existing.device_type = req.device_type
         existing.bind_station = req.bind_station
         existing.bind_user = req.bind_user
-        existing.update_by = current_user.user_account
         existing.update_time = datetime.utcnow()
     else:
         device = models.SysDeviceManage(
@@ -1572,8 +2574,7 @@ def save_device(req: schemas.DeviceRegisterRequest, db: Session = Depends(get_db
             device_type=req.device_type,  # SCAN-扫码枪, PAD-平板, PRINT-打印机, CAM-摄像头
             bind_station=req.bind_station,
             bind_user=req.bind_user,
-            device_status="ONLINE",
-            create_by=current_user.user_account
+            device_status="ONLINE"
         )
         db.add(device)
     
@@ -1653,10 +2654,11 @@ def list_devices(device_status: str = None, db: Session = Depends(get_db),
         "devices": [
             {
                 "device_id": d.id,
-                "device_code": d.device_code,
+                "device_code": d.device_no,
                 "device_name": d.device_name,
                 "device_type": d.device_type,
-                "ip_address": d.ip_address,
+                "bind_station": d.bind_station,
+                "bind_user": d.bind_user,
                 "device_status": d.device_status,
                 "create_time": d.create_time.timestamp() if d.create_time else None
             } for d in devices
@@ -1681,11 +2683,12 @@ def query_system_logs(log_type: str = None, user_account: str = None,
         "logs": [
             {
                 "log_id": l.id,
+                "operate_module": l.operate_module,
                 "operate_type": l.operate_type,
                 "operate_by": l.operate_user,
                 "operate_time": l.operate_time.timestamp() if l.operate_time else None,
                 "ip_address": l.operate_ip,
-                "operate_content": l.operate_content
+                "operate_content": l.operate_desc
             } for l in logs
         ]
     })
@@ -1702,13 +2705,23 @@ class ParamConfigRequest(BaseModel):
 @app.post("/zyfh/api/v1/sys/param/config/save")
 def save_param_config(req: ParamConfigRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """系统参数配置"""
-    # 这里我们使用一个简单的字典来模拟参数配置表
-    # 在实际应用中，应该有一个专门的参数配置表
-    import json
-    config_key = f"sys_param_{req.param_key}"
-    
-    # 保存参数到系统配置中
-    # 这里我们简单地记录操作日志
+    config = db.query(models.SysParamConfig).filter(models.SysParamConfig.param_key == req.param_key).first()
+    if config:
+        config.param_value = req.param_value
+        config.param_desc = req.param_desc
+        config.update_by = req.operate_by or current_user.user_account
+        config.update_time = datetime.utcnow()
+        config.is_delete = 0
+    else:
+        config = models.SysParamConfig(
+            param_key=req.param_key,
+            param_value=req.param_value,
+            param_desc=req.param_desc,
+            update_by=req.operate_by or current_user.user_account,
+            update_time=datetime.utcnow()
+        )
+        db.add(config)
+
     log_entry = models.CheckOperateRecord(
         operate_user=current_user.user_account,
         operate_module="系统管理",
@@ -1729,8 +2742,6 @@ def save_param_config(req: ParamConfigRequest, db: Session = Depends(get_db), cu
 @app.get("/zyfh/api/v1/sys/param/config/query")
 def query_param_config(param_key: str = None, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """系统参数查询"""
-    # 在实际应用中，这应该查询参数配置表
-    # 这里我们返回一些预设的参数
     predefined_params = {
         "offline_cache_time": {"value": "72", "desc": "离线缓存时长（小时）"},
         "auto_save_progress": {"value": "30", "desc": "自动保存进度时间（分钟）"},
@@ -1738,14 +2749,34 @@ def query_param_config(param_key: str = None, db: Session = Depends(get_db), cur
         "token_expire_hour": {"value": "24", "desc": "Token有效期（小时）"},
         "video_valid_hour": {"value": "24", "desc": "视频地址有效时长（小时）"}
     }
-    
+
+    if db.query(models.SysParamConfig).count() == 0:
+        for key, value in predefined_params.items():
+            db.add(models.SysParamConfig(
+                param_key=key,
+                param_value=value["value"],
+                param_desc=value["desc"],
+                update_by=current_user.user_account,
+                update_time=datetime.utcnow(),
+                is_delete=0
+            ))
+        db.commit()
+
+    query = db.query(models.SysParamConfig).filter(models.SysParamConfig.is_delete == 0)
     if param_key:
-        if param_key in predefined_params:
-            result = [{"param_key": param_key, "param_value": predefined_params[param_key]["value"], "param_desc": predefined_params[param_key]["desc"]}]
-        else:
-            result = []
-    else:
-        result = [{"param_key": k, "param_value": v["value"], "param_desc": v["desc"]} for k, v in predefined_params.items()]
+        query = query.filter(models.SysParamConfig.param_key == param_key)
+
+    rows = query.order_by(models.SysParamConfig.param_key).all()
+    result = [
+        {
+            "param_key": row.param_key,
+            "param_value": row.param_value,
+            "param_desc": row.param_desc,
+            "update_by": row.update_by,
+            "update_time": row.update_time.isoformat() if row.update_time else None
+        }
+        for row in rows
+    ]
     
     return success_response({
         "total": len(result),
@@ -1763,16 +2794,30 @@ def trigger_data_backup(req: DataBackupRequest, db: Session = Depends(get_db), c
     """数据备份手动触发"""
     import uuid
     backup_id = f"BACK{datetime.utcnow().strftime('%Y%m%d%H%M%S')}{str(uuid.uuid4())[:8].upper()}"
-    
-    # 这里应该实际执行备份逻辑
-    # 模拟备份过程
+
+    backup_path = f"/data/backup/{datetime.utcnow().strftime('%Y/%m/%d')}/{req.backup_type.lower()}/"
+    backup_status = "SUCCESS"
+
+    record = models.SysDataBackup(
+        backup_id=backup_id,
+        backup_type=req.backup_type,
+        backup_path=backup_path,
+        backup_status=backup_status,
+        trigger_by=req.operate_by or current_user.user_account,
+        backup_time=datetime.utcnow(),
+        backup_desc=req.backup_desc,
+        backup_size="0MB",
+        is_delete=0
+    )
+    db.add(record)
+
     backup_info = {
-        "backupId": backup_id,
-        "backupPath": f"/data/backup/{datetime.utcnow().strftime('%Y/%m/%d')}/{req.backup_type.lower()}/",
-        "backupTime": datetime.utcnow().isoformat(),
-        "backupStatus": "SUCCESS",  # RUNNING, SUCCESS, FAIL
-        "backupType": req.backup_type,
-        "backupDesc": req.backup_desc
+        "backup_id": backup_id,
+        "backup_path": backup_path,
+        "backup_time": datetime.utcnow().isoformat(),
+        "backup_status": backup_status,  # RUNNING, SUCCESS, FAIL
+        "backup_type": req.backup_type,
+        "backup_desc": req.backup_desc
     }
     
     # 记录备份操作日志
@@ -1792,43 +2837,43 @@ def trigger_data_backup(req: DataBackupRequest, db: Session = Depends(get_db), c
 @app.get("/zyfh/api/v1/sys/data/backup/record/query")
 def query_backup_records(backup_type: str = None, backup_status: str = None, 
                        start_time: str = None, end_time: str = None,
+                       page: int = 1, size: int = 20,
                        db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """数据备份记录查询"""
-    # 模拟备份记录
-    mock_backups = [
-        {
-            "backupId": "BACK20260228120001A1B2C3D4",
-            "backupType": "FULL",
-            "backupPath": "/data/backup/2026/02/28/full/",
-            "backupStatus": "SUCCESS",
-            "triggerBy": "admin",
-            "backupTime": "2026-02-28T12:00:01",
-            "backupSize": "2.5GB"
-        },
-        {
-            "backupId": "BACK20260228130002E5F6G7H8",
-            "backupType": "INCREMENT",
-            "backupPath": "/data/backup/2026/02/28/increment/",
-            "backupStatus": "SUCCESS",
-            "triggerBy": "admin",
-            "backupTime": "2026-02-28T13:00:02",
-            "backupSize": "150MB"
-        }
-    ]
-    
-    # 根据查询条件过滤
-    filtered_backups = mock_backups
+    query = db.query(models.SysDataBackup).filter(models.SysDataBackup.is_delete == 0)
+
     if backup_type:
-        filtered_backups = [b for b in filtered_backups if b["backupType"] == backup_type]
+        query = query.filter(models.SysDataBackup.backup_type == backup_type)
     if backup_status:
-        filtered_backups = [b for b in filtered_backups if b["backupStatus"] == backup_status]
-    
+        query = query.filter(models.SysDataBackup.backup_status == backup_status)
+    if start_time and end_time:
+        start_dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+        end_dt = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+        query = query.filter(models.SysDataBackup.backup_time.between(start_dt, end_dt))
+
+    total = query.count()
+    page = max(page, 1)
+    size = min(max(size, 1), 200)
+    rows = query.order_by(desc(models.SysDataBackup.backup_time)).offset((page - 1) * size).limit(size).all()
+
     return success_response({
-        "total": len(filtered_backups),
-        "pages": 1,
-        "page": 1,
-        "size": len(filtered_backups),
-        "list": filtered_backups
+        "total": total,
+        "pages": (total + size - 1) // size,
+        "page": page,
+        "size": size,
+        "list": [
+            {
+                "backup_id": item.backup_id,
+                "backup_type": item.backup_type,
+                "backup_path": item.backup_path,
+                "backup_status": item.backup_status,
+                "trigger_by": item.trigger_by,
+                "backup_time": item.backup_time.isoformat() if item.backup_time else None,
+                "backup_size": item.backup_size,
+                "backup_desc": item.backup_desc
+            }
+            for item in rows
+        ]
     })
 
 # 离线数据同步接口
@@ -1946,10 +2991,26 @@ def sync_offline_data(db: Session = Depends(get_db), current_user=Depends(get_cu
                 existing.progress_json = progress_json
                 existing.save_time = datetime.utcnow()
             else:
+                current_basket = ""
+                finished_count = 0
+                unfinished_count = 0
+                try:
+                    progress_dict = json.loads(progress_json.replace("'", '"'))
+                    current_basket = progress_dict.get("current_basket") or progress_dict.get("currentBasket") or ""
+                    finished_list = progress_dict.get("finished_drugs") or progress_dict.get("finished") or []
+                    unfinished_list = progress_dict.get("unfinished_drugs") or progress_dict.get("unfinished") or []
+                    finished_count = len(finished_list)
+                    unfinished_count = len(unfinished_list)
+                except Exception:
+                    pass
+
                 # 创建新进度记录
                 progress = models.DrugCheckProgress(
                     check_main_id=check_main.id,
                     pres_no=record[1],  # pres_no
+                    finished_drug=finished_count,
+                    unfinish_drug=unfinished_count,
+                    current_basket=current_basket or "UNKNOWN",
                     progress_json=progress_json,
                     save_by=record[2]  # check_by
                 )

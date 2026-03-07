@@ -1,10 +1,10 @@
 <template>
   <div class="trace-page">
-    <el-card>
+    <el-card class="module-card">
       <template #header>
         <span>溯源查询</span>
       </template>
-      <el-form :inline="true">
+      <el-form :inline="true" class="query-form">
         <el-form-item label="处方号">
           <el-input v-model="filters.presNo" placeholder="请输入处方号" clearable style="width: 200px" />
         </el-form-item>
@@ -28,7 +28,7 @@
         </el-form-item>
       </el-form>
 
-      <el-table :data="traceList" stripe>
+      <el-table :data="traceList" stripe class="trace-table">
         <el-table-column prop="presNo" label="处方号" width="150" />
         <el-table-column prop="cjId" label="院内编码" width="120" />
         <el-table-column prop="drugName" label="药品名称" width="120" />
@@ -78,9 +78,12 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
-import { getTraceRecords, generateReport } from '@/api'
+import { ref, reactive, onMounted } from 'vue'
+import { getTraceRecords, getTraceVideo, generateReport } from '@/api'
+import { useUserStore } from '@/stores/user'
 import { ElMessage } from 'element-plus'
+
+const userStore = useUserStore()
 
 const filters = reactive({
   presNo: '',
@@ -88,39 +91,27 @@ const filters = reactive({
 })
 
 const dateRange = ref([])
-const traceList = ref([
-  {
-    presNo: 'CF20260228001',
-    cjId: '13310',
-    drugName: '盐巴戟天',
-    scanTime: '2026-02-28 10:30:00',
-    checkBy: 'fh001',
-    basketNo: 'K20260228001',
-    scanResult: 1,
-    patientName: '张三',
-    spec: '5g',
-    scanSpec: '5g',
-    checkStation: 'T01'
-  },
-  {
-    presNo: 'CF20260228002',
-    cjId: '13311',
-    drugName: '当归',
-    scanTime: '2026-02-28 10:25:00',
-    checkBy: 'fh002',
-    basketNo: 'K20260228002',
-    scanResult: 0,
-    patientName: '李四',
-    spec: '3g',
-    scanSpec: '5g',
-    checkStation: 'T02'
-  }
-])
+const traceList = ref([])
 
 const detailDialogVisible = ref(false)
 const videoDialogVisible = ref(false)
 const currentDetail = ref({})
 const videoUrl = ref('')
+
+const formatDateTimeForApi = (dateTime) => {
+  if (!dateTime) return ''
+  const dt = new Date(dateTime)
+  if (Number.isNaN(dt.getTime())) {
+    return String(dateTime).replace('T', ' ').slice(0, 19)
+  }
+  const y = dt.getFullYear()
+  const m = String(dt.getMonth() + 1).padStart(2, '0')
+  const d = String(dt.getDate()).padStart(2, '0')
+  const hh = String(dt.getHours()).padStart(2, '0')
+  const mm = String(dt.getMinutes()).padStart(2, '0')
+  const ss = String(dt.getSeconds()).padStart(2, '0')
+  return `${y}-${m}-${d} ${hh}:${mm}:${ss}`
+}
 
 const handleSearch = async () => {
   try {
@@ -134,6 +125,8 @@ const handleSearch = async () => {
     })
     if (res.code === '0000') {
       traceList.value = res.data.list || []
+    } else {
+      ElMessage.error(res.msg || '查询失败')
     }
   } catch (error) {
     ElMessage.error('查询失败：' + error.message)
@@ -152,10 +145,29 @@ const handleViewDetail = (row) => {
   detailDialogVisible.value = true
 }
 
-const handleViewVideo = (row) => {
+const handleViewVideo = async (row) => {
   currentDetail.value = row
-  videoUrl.value = `http://example.com/video/${row.presNo}_${row.scanTime}.mp4`
-  videoDialogVisible.value = true
+  videoUrl.value = ''
+  try {
+    const res = await getTraceVideo({
+      presNo: row.presNo,
+      scanTime: formatDateTimeForApi(row.scanTime),
+      checkStation: row.checkStation || 'T01'
+    })
+    if (res.code === '0000') {
+      const video = (res.data.videos || [])[0]
+      if (!video || !video.videoUrl) {
+        ElMessage.warning('未找到对应视频')
+        return
+      }
+      videoUrl.value = video.videoUrl
+      videoDialogVisible.value = true
+    } else {
+      ElMessage.error(res.msg || '视频查询失败')
+    }
+  } catch (error) {
+    ElMessage.error('视频查询失败：' + error.message)
+  }
 }
 
 const handleGenerateReport = async () => {
@@ -168,11 +180,13 @@ const handleGenerateReport = async () => {
     const res = await generateReport({
       presNoList: [...new Set(presNos)],
       reportType: 'PDF',
-      generateBy: 'current_user'
+      generateBy: userStore.userInfo.userAccount || 'current_user'
     })
     if (res.code === '0000') {
       ElMessage.success('报告生成成功')
-      window.open(res.data.downloadUrl, '_blank')
+      if (res.data.downloadUrl) {
+        window.open(res.data.downloadUrl, '_blank')
+      }
     } else {
       ElMessage.error(res.msg || '生成失败')
     }
@@ -180,12 +194,40 @@ const handleGenerateReport = async () => {
     ElMessage.error('生成失败：' + error.message)
   }
 }
+
+onMounted(() => {
+  handleSearch()
+})
 </script>
 
 <style scoped>
+.trace-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.module-card :deep(.el-card__header) {
+  background: linear-gradient(90deg, rgba(120, 146, 98, 0.1) 0%, rgba(120, 146, 98, 0.02) 58%);
+}
+
+.query-form {
+  padding: 4px 0 10px;
+}
+
+.query-form :deep(.el-form-item) {
+  margin-bottom: 10px;
+}
+
+.module-card :deep(.el-table) {
+  border-radius: 6px;
+  overflow: hidden;
+}
+
 .video-container {
-  background-color: #000;
-  padding: 20px;
-  border-radius: 4px;
+  background: linear-gradient(180deg, rgba(51, 51, 51, 0.92), rgba(51, 51, 51, 0.84));
+  padding: 14px;
+  border-radius: 6px;
+  border: 1px solid #4a4f47;
 }
 </style>

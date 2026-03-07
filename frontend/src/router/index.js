@@ -60,6 +60,12 @@ const routes = [
         meta: { title: '工作量统计' }
       },
       {
+        path: 'profile',
+        name: 'Profile',
+        component: () => import('@/views/Profile.vue'),
+        meta: { title: '个人中心' }
+      },
+      {
         path: 'system',
         name: 'System',
         component: () => import('@/views/System.vue'),

@@ -1,0 +1,15 @@
+{
+  "report_id": "RPT1772850463",
+  "pres_no": "CF20260307001",
+  "total_operations": 1,
+  "operations": [
+    {
+      "time": "2026-03-07T01:58:58.926107",
+      "type": "提交",
+      "user": "fh001",
+      "content": "处方CF20260307001完成复核流程"
+    }
+  ],
+  "generated_by": "admin",
+  "generated_time": "2026-03-07T02:27:43.217669"
+}

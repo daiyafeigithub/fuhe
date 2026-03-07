@@ -1,10 +1,10 @@
 <template>
   <div class="basket-page">
-    <el-card>
+    <el-card class="module-card">
       <template #header>
         <span>分筐管理</span>
       </template>
-      <el-form :inline="true">
+      <el-form :inline="true" class="query-form">
         <el-form-item label="筐号">
           <el-input v-model="basketForm.basketNo" placeholder="请输入筐号" style="width: 200px" />
         </el-form-item>
@@ -49,11 +49,11 @@
       </el-table>
     </el-card>
 
-    <el-card style="margin-top: 20px">
+    <el-card class="module-card relation-card">
       <template #header>
         <span>处方分筐关联</span>
       </template>
-      <el-form :inline="true">
+      <el-form :inline="true" class="relation-form">
         <el-form-item label="处方号">
           <el-input v-model="presNo" placeholder="请输入处方号" />
         </el-form-item>
@@ -90,36 +90,39 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
-import { saveBasket, saveBasketRelation } from '@/api'
-import { ElMessage } from 'element-plus'
+import { ref, reactive, onMounted, computed } from 'vue'
+import { saveBasket, saveBasketRelation, getBasketList, getBasketRelations, disableBasket } from '@/api'
+import { useUserStore } from '@/stores/user'
+import { ElMessage, ElMessageBox } from 'element-plus'
+
+const userStore = useUserStore()
+const currentUserAccount = computed(() => userStore.userInfo.userAccount || 'admin')
 
 const basketForm = reactive({
   basketNo: '',
   basketName: ''
 })
 
-const basketList = ref([
-  {
-    basketNo: 'K20260228001',
-    basketName: '处方CF20260228001专用筐',
-    createType: 1,
-    status: 1,
-    createTime: '2026-02-28 09:00:00'
-  },
-  {
-    basketNo: 'K20260228002',
-    basketName: '处方CF20260228002专用筐',
-    createType: 2,
-    status: 1,
-    createTime: '2026-02-28 09:10:00'
-  }
-])
+const basketList = ref([])
 
 const presNo = ref('')
 const selectedBasket = ref('')
 const drugList = ref([])
 const selectedDrugs = ref([])
+
+const loadBasketList = async () => {
+  try {
+    const res = await getBasketList()
+    if (res.code === '0000') {
+      basketList.value = res.data.list || res.data.baskets || []
+      if (selectedBasket.value && !basketList.value.some(item => item.basketNo === selectedBasket.value)) {
+        selectedBasket.value = ''
+      }
+    }
+  } catch (error) {
+    ElMessage.error('加载分筐列表失败：' + error.message)
+  }
+}
 
 const handleAddBasket = async () => {
   if (!basketForm.basketNo) {
@@ -128,14 +131,16 @@ const handleAddBasket = async () => {
   }
   try {
     const res = await saveBasket({
-      ...basketForm,
-      status: 1,
-      createBy: 'current_user'
+      basketNo: basketForm.basketNo,
+      basketName: basketForm.basketName,
+      createBy: currentUserAccount.value,
+      status: 1
     })
     if (res.code === '0000') {
       ElMessage.success('添加成功')
       basketForm.basketNo = ''
       basketForm.basketName = ''
+      await loadBasketList()
     } else {
       ElMessage.error(res.msg || '添加失败')
     }
@@ -144,28 +149,53 @@ const handleAddBasket = async () => {
   }
 }
 
-const handleDisable = (row) => {
-  row.status = 0
-  ElMessage.success('已作废')
+const handleDisable = async (row) => {
+  try {
+    await ElMessageBox.confirm(`确定作废分筐 ${row.basketNo} 吗？`, '提示', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    const res = await disableBasket({ basketNo: row.basketNo, operateBy: currentUserAccount.value })
+    if (res.code === '0000') {
+      ElMessage.success('已作废')
+      await loadBasketList()
+    } else {
+      ElMessage.error(res.msg || '作废失败')
+    }
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error('作废失败：' + error.message)
+    }
+  }
 }
 
-const handleLoadDrugs = () => {
-  drugList.value = [
-    {
-      cjId: '13310',
-      drugName: '盐巴戟天',
-      spec: '5g',
-      presNum: 2,
-      basketNo: ''
-    },
-    {
-      cjId: '13311',
-      drugName: '当归',
-      spec: '3g',
-      presNum: 3,
-      basketNo: ''
+const handleLoadDrugs = async () => {
+  if (!presNo.value) {
+    ElMessage.warning('请输入处方号')
+    return
+  }
+  try {
+    const res = await getBasketRelations({
+      presNo: presNo.value,
+      basketNo: selectedBasket.value || undefined
+    })
+    if (res.code === '0000') {
+      drugList.value = (res.data.list || []).map(item => ({
+        id: item.id,
+        cjId: item.cjId,
+        drugName: item.drugName,
+        spec: item.spec,
+        presNum: item.presNum,
+        basketNo: item.basketNo || ''
+      }))
+      selectedDrugs.value = []
+    } else {
+      ElMessage.error(res.msg || '加载药品失败')
     }
-  ]
+  } catch (error) {
+    ElMessage.error('加载药品失败：' + error.message)
+  }
 }
 
 const handleSelectionChange = (selection) => {
@@ -186,15 +216,13 @@ const handleSaveRelation = async () => {
       presNo: presNo.value,
       basketNo: selectedBasket.value,
       cjIdList: selectedDrugs.value.map(item => item.cjId),
-      createBy: 'current_user'
+      createBy: currentUserAccount.value,
+      checkMainId: 0
     })
     if (res.code === '0000') {
       ElMessage.success('关联成功')
-      drugList.value.forEach(drug => {
-        if (selectedDrugs.value.includes(drug)) {
-          drug.basketNo = selectedBasket.value
-        }
-      })
+      await handleLoadDrugs()
+      await loadBasketList()
     } else {
       ElMessage.error(res.msg || '关联失败')
     }
@@ -202,4 +230,40 @@ const handleSaveRelation = async () => {
     ElMessage.error('关联失败：' + error.message)
   }
 }
+
+onMounted(() => {
+  loadBasketList()
+})
 </script>
+
+<style scoped>
+.basket-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.module-card :deep(.el-card__header) {
+  background: linear-gradient(90deg, rgba(120, 146, 98, 0.1) 0%, rgba(120, 146, 98, 0.02) 58%);
+}
+
+.query-form,
+.relation-form {
+  padding: 4px 0 10px;
+}
+
+.query-form :deep(.el-form-item),
+.relation-form :deep(.el-form-item) {
+  margin-bottom: 10px;
+}
+
+.relation-card :deep(.el-table),
+.module-card :deep(.el-table) {
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.module-card :deep(.el-tag) {
+  border-radius: 4px;
+}
+</style>

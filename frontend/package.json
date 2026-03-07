@@ -1,7 +1,7 @@
 {
   "name": "fuhe-frontend",
   "version": "1.0.0",
-  "description": "湖南省二附院精致饮片复核系统 - 前端应用",
+  "description": "饮片复核系统 - 前端应用",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

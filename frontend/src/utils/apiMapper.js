@@ -11,22 +11,47 @@ const snakeToCamel = (str) => {
   return str.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase())
 }
 
+const isPlainObject = (value) => {
+  if (!value || Object.prototype.toString.call(value) !== '[object Object]') {
+    return false
+  }
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+const isSpecialObject = (value) => {
+  if (value instanceof Date) return true
+  if (typeof FormData !== 'undefined' && value instanceof FormData) return true
+  if (typeof Blob !== 'undefined' && value instanceof Blob) return true
+  if (typeof File !== 'undefined' && value instanceof File) return true
+  if (typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams) return true
+  return false
+}
+
 export const transformRequest = (data) => {
-  if (!data || typeof data !== 'object') return data
+  if (Array.isArray(data)) {
+    return data.map(item => transformRequest(item))
+  }
+
+  if (isSpecialObject(data) || !isPlainObject(data)) {
+    return data
+  }
 
   const transformed = {}
   for (const key in data) {
     const snakeKey = camelToSnake(key)
-    transformed[snakeKey] = data[key]
+    transformed[snakeKey] = transformRequest(data[key])
   }
   return transformed
 }
 
 export const transformResponse = (data) => {
-  if (!data || typeof data !== 'object') return data
-
   if (Array.isArray(data)) {
     return data.map(item => transformResponse(item))
+  }
+
+  if (isSpecialObject(data) || !isPlainObject(data)) {
+    return data
   }
 
   const transformed = {}

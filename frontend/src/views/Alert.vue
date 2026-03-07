@@ -1,10 +1,10 @@
 <template>
   <div class="alert-page">
-    <el-card>
+    <el-card class="module-card">
       <template #header>
         <span>错误记录</span>
       </template>
-      <el-form :inline="true">
+      <el-form :inline="true" class="query-form">
         <el-form-item label="错误类型">
           <el-select v-model="filters.errorType" placeholder="全部" clearable style="width: 150px">
             <el-option label="药品错误" value="DRUG_ERROR" />
@@ -50,7 +50,7 @@
             >
               处理
             </el-button>
-            <span v-else style="color: #909399">已处理</span>
+            <span v-else class="status-text">已处理</span>
           </template>
         </el-table-column>
       </el-table>
@@ -83,37 +83,19 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { getErrorList, handleError } from '@/api'
+import { useUserStore } from '@/stores/user'
 import { ElMessage } from 'element-plus'
+
+const userStore = useUserStore()
 
 const filters = reactive({
   errorType: '',
   presNo: ''
 })
 
-const errorList = ref([
-  {
-    errorId: 'ERR001',
-    errorTime: '2026-02-28 10:30:00',
-    presNo: 'CF20260228001',
-    cjId: '13310',
-    drugName: '盐巴戟天',
-    errorType: 'DRUG_ERROR',
-    errorDesc: '扫码规格5g与处方要求3g不匹配',
-    errorStatus: 1
-  },
-  {
-    errorId: 'ERR002',
-    errorTime: '2026-02-28 10:25:00',
-    presNo: 'CF20260228002',
-    cjId: '13311',
-    drugName: '当归',
-    errorType: 'NUM_ERROR',
-    errorDesc: '扫码数量3与处方要求2不匹配',
-    errorStatus: 2
-  }
-])
+const errorList = ref([])
 
 const dialogVisible = ref(false)
 const currentError = ref(null)
@@ -158,8 +140,9 @@ const handleConfirmProcess = async () => {
   try {
     const res = await handleError({
       errorId: currentError.value.errorId,
-      handleBy: 'current_user',
-      ...processForm
+      handleBy: userStore.userInfo.userAccount || 'admin',
+      handleResult: processForm.handleType,
+      handleDesc: processForm.handleDesc
     })
     if (res.code === '0000') {
       ElMessage.success('处理成功')
@@ -173,4 +156,45 @@ const handleConfirmProcess = async () => {
     ElMessage.error('处理失败：' + error.message)
   }
 }
+
+onMounted(() => {
+  handleSearch()
+})
 </script>
+
+<style scoped>
+.alert-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.module-card :deep(.el-card__header) {
+  background: linear-gradient(90deg, rgba(120, 146, 98, 0.1) 0%, rgba(120, 146, 98, 0.02) 58%);
+}
+
+.query-form {
+  padding: 4px 0 10px;
+}
+
+.query-form :deep(.el-form-item) {
+  margin-bottom: 10px;
+}
+
+.module-card :deep(.el-table) {
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.module-card :deep(.el-tag) {
+  border-radius: 4px;
+}
+
+.status-text {
+  color: #8c9488;
+}
+
+:deep(.el-dialog__body) {
+  padding-top: 14px;
+}
+</style>

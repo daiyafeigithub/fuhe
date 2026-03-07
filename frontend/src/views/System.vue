@@ -1,10 +1,10 @@
 <template>
   <div class="system-page">
-    <el-card>
+    <el-card class="module-card">
       <template #header>
         <span>用户管理</span>
       </template>
-      <el-form :inline="true">
+      <el-form :inline="true" class="query-form">
         <el-form-item label="账号">
           <el-input v-model="userFilters.userAccount" placeholder="请输入账号" clearable style="width: 150px" />
         </el-form-item>
@@ -17,7 +17,7 @@
         </el-form-item>
       </el-form>
 
-      <el-table :data="userList" stripe>
+      <el-table :data="userList" stripe class="user-table">
         <el-table-column prop="userAccount" label="账号" />
         <el-table-column prop="userName" label="姓名" />
         <el-table-column prop="deptName" label="所属科室" />
@@ -39,13 +39,15 @@
       </el-table>
     </el-card>
 
-    <el-card style="margin-top: 20px">
+    <el-card class="module-card role-card">
       <template #header>
         <span>角色管理</span>
       </template>
-      <el-button type="primary" @click="handleAddRole">新增角色</el-button>
+      <div class="role-toolbar">
+        <el-button type="primary" @click="handleAddRole">新增角色</el-button>
+      </div>
 
-      <el-table :data="roleList" stripe style="margin-top: 15px">
+      <el-table :data="roleList" stripe class="role-table">
         <el-table-column prop="roleCode" label="角色编码" />
         <el-table-column prop="roleName" label="角色名称" />
         <el-table-column prop="rolePermission" label="权限标识" show-overflow-tooltip />
@@ -57,9 +59,10 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150">
+        <el-table-column label="操作" width="200">
           <template #default="{ row }">
             <el-button link type="primary" @click="handleEditRole(row)">编辑</el-button>
+            <el-button link type="danger" @click="handleDeleteRole(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -97,12 +100,39 @@
         <el-button type="primary" @click="handleSaveUser">确定</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="roleDialogVisible" :title="roleDialogTitle" width="600px">
+      <el-form ref="roleFormRef" :model="roleForm" :rules="roleRules" label-width="100px">
+        <el-form-item label="角色编码" prop="roleCode">
+          <el-input v-model="roleForm.roleCode" :disabled="isEditRole" />
+        </el-form-item>
+        <el-form-item label="角色名称" prop="roleName">
+          <el-input v-model="roleForm.roleName" />
+        </el-form-item>
+        <el-form-item label="权限标识" prop="rolePermission">
+          <el-input v-model="roleForm.rolePermission" placeholder="如：check:scan,check:save" />
+        </el-form-item>
+        <el-form-item label="角色描述" prop="roleDesc">
+          <el-input v-model="roleForm.roleDesc" type="textarea" :rows="3" />
+        </el-form-item>
+        <el-form-item label="状态" prop="status">
+          <el-radio-group v-model="roleForm.status">
+            <el-radio :value="1">启用</el-radio>
+            <el-radio :value="0">禁用</el-radio>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="roleDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="handleSaveRole">确定</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
-import { getUserList, saveUser, deleteUser, saveRole } from '@/api'
+import { ref, reactive, onMounted } from 'vue'
+import { getUserList, saveUser, deleteUser, getRoleList, saveRole, deleteRole } from '@/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const userFilters = reactive({
@@ -110,50 +140,19 @@ const userFilters = reactive({
   userName: ''
 })
 
-const userList = ref([
-  {
-    id: 1,
-    userAccount: 'admin',
-    userName: '管理员',
-    deptName: '信息科',
-    post: '系统管理员',
-    phone: '13800138000',
-    status: 1
-  },
-  {
-    id: 2,
-    userAccount: 'fh001',
-    userName: '张复核',
-    deptName: '中药房',
-    post: '复核员',
-    phone: '13900139000',
-    status: 1
-  }
-])
+const userList = ref([])
 
-const roleList = ref([
-  {
-    id: 1,
-    roleCode: 'ADMIN',
-    roleName: '超级管理员',
-    rolePermission: 'all',
-    roleDesc: '系统最高权限',
-    status: 1
-  },
-  {
-    id: 2,
-    roleCode: 'CHECKER',
-    roleName: '复核员',
-    rolePermission: 'check:scan,check:save,basket:manage',
-    roleDesc: '饮片复核人员',
-    status: 1
-  }
-])
+const roleList = ref([])
 
 const userDialogVisible = ref(false)
 const userDialogTitle = ref('新增用户')
 const userFormRef = ref(null)
 const isEditUser = ref(false)
+
+const roleDialogVisible = ref(false)
+const roleDialogTitle = ref('新增角色')
+const roleFormRef = ref(null)
+const isEditRole = ref(false)
 
 const userForm = reactive({
   id: null,
@@ -172,6 +171,21 @@ const userRules = {
   userPwd: [{ required: true, message: '请输入密码', trigger: 'blur' }],
   deptName: [{ required: true, message: '请输入所属科室', trigger: 'blur' }],
   post: [{ required: true, message: '请输入岗位', trigger: 'blur' }]
+}
+
+const roleForm = reactive({
+  id: null,
+  roleCode: '',
+  roleName: '',
+  rolePermission: '',
+  roleDesc: '',
+  status: 1
+})
+
+const roleRules = {
+  roleCode: [{ required: true, message: '请输入角色编码', trigger: 'blur' }],
+  roleName: [{ required: true, message: '请输入角色名称', trigger: 'blur' }],
+  rolePermission: [{ required: true, message: '请输入权限标识', trigger: 'blur' }]
 }
 
 const handleSearchUser = async () => {
@@ -257,10 +271,122 @@ const handleDeleteUser = async (row) => {
 }
 
 const handleAddRole = () => {
-  ElMessage.info('角色编辑功能开发中')
+  roleDialogTitle.value = '新增角色'
+  isEditRole.value = false
+  Object.assign(roleForm, {
+    id: null,
+    roleCode: '',
+    roleName: '',
+    rolePermission: '',
+    roleDesc: '',
+    status: 1
+  })
+  roleDialogVisible.value = true
 }
 
-const handleEditRole = () => {
-  ElMessage.info('角色编辑功能开发中')
+const handleEditRole = (row) => {
+  roleDialogTitle.value = '编辑角色'
+  isEditRole.value = true
+  Object.assign(roleForm, row)
+  roleDialogVisible.value = true
 }
+
+const loadRoleList = async () => {
+  try {
+    const res = await getRoleList()
+    if (res.code === '0000') {
+      roleList.value = res.data.list || []
+    }
+  } catch (error) {
+    ElMessage.error('角色列表加载失败：' + error.message)
+  }
+}
+
+const handleSaveRole = async () => {
+  if (!roleFormRef.value) return
+  await roleFormRef.value.validate(async (valid) => {
+    if (!valid) return
+    try {
+      const res = await saveRole({
+        roleCode: roleForm.roleCode,
+        roleName: roleForm.roleName,
+        rolePermission: roleForm.rolePermission,
+        roleDesc: roleForm.roleDesc,
+        status: roleForm.status
+      })
+      if (res.code === '0000') {
+        ElMessage.success('角色保存成功')
+        roleDialogVisible.value = false
+        loadRoleList()
+      } else {
+        ElMessage.error(res.msg || '角色保存失败')
+      }
+    } catch (error) {
+      ElMessage.error('角色保存失败：' + error.message)
+    }
+  })
+}
+
+const handleDeleteRole = async (row) => {
+  try {
+    await ElMessageBox.confirm(`确定删除角色 ${row.roleName} 吗？`, '提示', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    const res = await deleteRole({ id: row.id, operateBy: 'current_user' })
+    if (res.code === '0000') {
+      ElMessage.success('角色删除成功')
+      loadRoleList()
+    } else {
+      ElMessage.error(res.msg || '角色删除失败')
+    }
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error('角色删除失败：' + error.message)
+    }
+  }
+}
+
+onMounted(() => {
+  handleSearchUser()
+  loadRoleList()
+})
 </script>
+
+<style scoped>
+.system-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.module-card :deep(.el-card__header) {
+  background: linear-gradient(90deg, rgba(120, 146, 98, 0.1) 0%, rgba(120, 146, 98, 0.02) 58%);
+}
+
+.query-form {
+  padding: 4px 0 10px;
+}
+
+.query-form :deep(.el-form-item) {
+  margin-bottom: 10px;
+}
+
+.role-toolbar {
+  margin-bottom: 10px;
+}
+
+.module-card :deep(.el-table) {
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.module-card :deep(.el-tag) {
+  border-radius: 4px;
+}
+
+:deep(.el-dialog__body) {
+  padding-top: 14px;
+}
+</style>

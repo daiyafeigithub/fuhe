@@ -300,3 +300,26 @@ class SysDeviceManage(Base):
     create_time = Column(DateTime, default=datetime.utcnow)
     update_time = Column(DateTime)  # 根据文档应该有更新时间
     is_delete = Column(Integer, default=0)
+
+class SysParamConfig(Base):
+    __tablename__ = "sys_param_config"
+    id = Column(Integer, primary_key=True)
+    param_key = Column(String(50), unique=True, nullable=False)
+    param_value = Column(String(200), nullable=False)
+    param_desc = Column(String(200))
+    update_by = Column(String(20), nullable=False)
+    update_time = Column(DateTime, default=datetime.utcnow)
+    is_delete = Column(Integer, default=0)
+
+class SysDataBackup(Base):
+    __tablename__ = "sys_data_backup"
+    id = Column(Integer, primary_key=True)
+    backup_id = Column(String(50), unique=True, nullable=False)
+    backup_type = Column(String(20), nullable=False)
+    backup_path = Column(String(255), nullable=False)
+    backup_status = Column(String(20), nullable=False)
+    trigger_by = Column(String(20), nullable=False)
+    backup_time = Column(DateTime, default=datetime.utcnow)
+    backup_desc = Column(String(200))
+    backup_size = Column(String(50))
+    is_delete = Column(Integer, default=0)

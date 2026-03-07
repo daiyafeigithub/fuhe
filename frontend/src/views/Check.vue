@@ -1,10 +1,10 @@
 <template>
   <div class="check-page">
-    <el-card>
+    <el-card class="module-card">
       <template #header>
         <span>扫码复核</span>
       </template>
-      <el-form :inline="true">
+      <el-form :inline="true" class="init-form">
         <el-form-item label="处方号">
           <el-input v-model="presNo" placeholder="请输入处方号" clearable @keyup.enter="handleInit" />
         </el-form-item>
@@ -23,7 +23,7 @@
           title="处方信息"
           type="info"
           :closable="false"
-          style="margin-bottom: 20px"
+          class="prescription-alert"
         >
           <p>处方号：{{ prescription.presNo }}</p>
           <p>患者姓名：{{ prescription.patientName }}</p>
@@ -31,7 +31,7 @@
           <p>复核人员：{{ currentUser }}</p>
         </el-alert>
 
-        <el-form :inline="true">
+        <el-form :inline="true" class="scan-form">
           <el-form-item label="筐号">
             <el-select v-model="currentBasket" placeholder="请选择筐号" style="width: 200px">
               <el-option
@@ -62,10 +62,10 @@
 
         <el-divider />
 
-        <h4>复核进度：{{ checkedCount }} / {{ totalCount }}</h4>
+        <h4 class="progress-title">复核进度：{{ checkedCount }} / {{ totalCount }}</h4>
         <el-progress :percentage="progressPercentage" :status="progressStatus" />
 
-        <el-table :data="drugList" stripe style="margin-top: 20px">
+        <el-table :data="drugList" stripe class="check-table">
           <el-table-column prop="cjId" label="院内编码" />
           <el-table-column prop="drugName" label="药品名称" />
           <el-table-column prop="spec" label="规格" />
@@ -85,20 +85,23 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
-import { initCheck, scanCheck, saveProgress, submitCheck } from '@/api'
+import { ref, computed, onMounted } from 'vue'
+import { initCheck, scanCheck, saveProgress, submitCheck, getBasketList } from '@/api'
+import { useUserStore } from '@/stores/user'
 import { ElMessage, ElMessageBox } from 'element-plus'
+
+const userStore = useUserStore()
 
 const presNo = ref('')
 const checkStation = ref('T01')
 const initialized = ref(false)
 const scanContent = ref('')
 const currentBasket = ref('')
-const currentUser = ref('fh001')
+const currentUser = computed(() => userStore.userInfo.userAccount || 'admin')
 
 const prescription = ref({})
 const drugList = ref([])
-const baskets = ref(['K20260228001', 'K20260228002', 'K20260228003'])
+const baskets = ref([])
 
 const checkedCount = computed(() => drugList.value.filter(item => item.isCheck).length)
 const totalCount = computed(() => drugList.value.length)
@@ -112,6 +115,20 @@ const progressStatus = computed(() => {
   return 'exception'
 })
 
+const loadBasketOptions = async () => {
+  try {
+    const res = await getBasketList({ status: 1 })
+    if (res.code === '0000') {
+      baskets.value = (res.data.list || []).map(item => item.basketNo)
+      if (!currentBasket.value && baskets.value.length > 0) {
+        currentBasket.value = baskets.value[0]
+      }
+    }
+  } catch {
+    // 静默处理，避免影响复核流程
+  }
+}
+
 const handleInit = async () => {
   if (!presNo.value) {
     ElMessage.warning('请输入处方号')
@@ -124,14 +141,25 @@ const handleInit = async () => {
       checkStation: checkStation.value
     })
     if (res.code === '0000') {
-      prescription.value = res.data.prescription
-      drugList.value = res.data.drugList.map(item => ({
+      prescription.value = res.data.prescription || {
+        presNo: res.data.presNo,
+        patientName: '-',
+        docName: '-'
+      }
+      const list = Array.isArray(res.data.drugList) ? res.data.drugList : []
+      drugList.value = list.map(item => ({
         ...item,
-        scanNum: 0,
-        isCheck: false
+        scanNum: item.scanNum || 0,
+        isCheck: !!item.isCheck
       }))
+      if (Array.isArray(res.data.baskets) && res.data.baskets.length > 0) {
+        baskets.value = res.data.baskets
+        if (!currentBasket.value) {
+          currentBasket.value = baskets.value[0]
+        }
+      }
       initialized.value = true
-      ElMessage.success('初始化成功')
+      ElMessage.success(res.data.status === 'inProgress' ? '已恢复复核进度' : '初始化成功')
     } else {
       ElMessage.error(res.msg || '初始化失败')
     }
@@ -157,18 +185,37 @@ const handleScan = async () => {
       checkBy: currentUser.value
     })
     if (res.code === '0000') {
-      const { drugInfo, scanResult } = res.data
-      const drug = drugList.value.find(item => item.cjId === drugInfo.cjId)
+      const payload = res.data || {}
+      const drugInfo = payload.drugInfo || {
+        cjId: payload.cjId,
+        drugName: payload.drugName,
+        spec: payload.spec,
+        presNum: payload.presNum || 1
+      }
+      const scanResult = payload.scanResult || payload.scanResultText || payload.scan_result_text || 'match'
+      let drug = drugList.value.find(item => item.cjId === drugInfo.cjId)
       if (drug) {
         drug.scanNum += 1
         if (drug.scanNum >= drug.presNum) {
           drug.isCheck = true
         }
+      } else if (scanResult === 'match' || scanResult === 'SUCCESS') {
+        drug = {
+          cjId: drugInfo.cjId,
+          drugName: drugInfo.drugName || drugInfo.cjId,
+          spec: drugInfo.spec || '-',
+          presNum: drugInfo.presNum || 1,
+          scanNum: 1,
+          isCheck: (drugInfo.presNum || 1) <= 1
+        }
+        drugList.value.push(drug)
       }
-      if (scanResult === 'match') {
+      if (scanResult === 'match' || scanResult === 'SUCCESS') {
         ElMessage.success('扫码成功')
-      } else if (scanResult === 'mismatch') {
+      } else if (scanResult === 'mismatch' || scanResult === 'MISMATCH') {
         ElMessage.warning('药品不匹配')
+      } else {
+        ElMessage.info('扫码完成')
       }
     } else {
       ElMessage.error(res.msg || '扫码失败')
@@ -184,11 +231,9 @@ const handleSaveProgress = async () => {
     const res = await saveProgress({
       presNo: presNo.value,
       checkBy: currentUser.value,
-      progressInfo: {
-        finished: drugList.value.filter(item => item.isCheck).map(item => item.cjId),
-        unfinish: drugList.value.filter(item => !item.isCheck).map(item => item.cjId),
-        currentBasket: currentBasket.value
-      }
+      finishedDrugs: drugList.value.filter(item => item.isCheck).map(item => item.cjId),
+      unfinishedDrugs: drugList.value.filter(item => !item.isCheck).map(item => item.cjId),
+      currentBasket: currentBasket.value
     })
     if (res.code === '0000') {
       ElMessage.success('进度保存成功')
@@ -227,10 +272,55 @@ const handleSubmit = async () => {
     }
   }
 }
+
+onMounted(() => {
+  loadBasketOptions()
+})
 </script>
 
 <style scoped>
+.check-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.module-card :deep(.el-card__header) {
+  background: linear-gradient(90deg, rgba(120, 146, 98, 0.1) 0%, rgba(120, 146, 98, 0.02) 58%);
+}
+
+.init-form,
+.scan-form {
+  padding: 4px 0 8px;
+}
+
+.init-form :deep(.el-form-item),
+.scan-form :deep(.el-form-item) {
+  margin-bottom: 10px;
+}
+
+.prescription-alert {
+  margin-bottom: 18px;
+  border-color: #d6dfca;
+  background: rgba(120, 146, 98, 0.08);
+}
+
 .el-alert p {
   margin: 5px 0;
+}
+
+.progress-title {
+  margin-bottom: 10px;
+  color: #3d4a36;
+  font-size: 15px;
+}
+
+.check-table {
+  margin-top: 18px;
+}
+
+.module-card :deep(.el-table) {
+  border-radius: 6px;
+  overflow: hidden;
 }
 </style>

@@ -19,7 +19,8 @@ export const useUserStore = defineStore('user', {
       try {
         const res = await loginApi({ userAccount, userPwd })
         if (res.code === '0000') {
-          this.token = res.data.token
+          const rawToken = res.data.token || ''
+          this.token = rawToken.replace(/^Bearer\s+/i, '')
           this.userInfo = res.data.userInfo
           localStorage.setItem('token', this.token)
           localStorage.setItem('userInfo', JSON.stringify(this.userInfo))
@@ -39,6 +40,11 @@ export const useUserStore = defineStore('user', {
       this.userInfo = {}
       localStorage.removeItem('token')
       localStorage.removeItem('userInfo')
+    },
+
+    setUserInfo(userInfo) {
+      this.userInfo = userInfo || {}
+      localStorage.setItem('userInfo', JSON.stringify(this.userInfo))
     }
   }
 })

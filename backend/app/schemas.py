@@ -92,13 +92,18 @@ class BasketCreateRequest(BaseModel):
     basket_no: str
     basket_name: Optional[str] = None
     create_by: str
+    status: Optional[int] = 1
+
+class BasketDisableRequest(BaseModel):
+    basket_no: str
+    operate_by: Optional[str] = None
 
 class BasketDrugRelationRequest(BaseModel):
     pres_no: str
     basket_no: str
     cj_id_list: List[str]
-    create_by: str
-    check_main_id: int
+    create_by: Optional[str] = None
+    check_main_id: Optional[int] = None
 
 class BasketCheckConfirmRequest(BaseModel):
     pres_no: str
@@ -162,6 +167,18 @@ class DeviceRegisterRequest(BaseModel):
     bind_station: Optional[str] = None
     bind_user: Optional[str] = None
 
+
+class UserProfileUpdateRequest(BaseModel):
+    user_name: str
+    dept_name: str
+    post: str
+    phone: Optional[str] = None
+
+
+class UserPasswordUpdateRequest(BaseModel):
+    old_password: str
+    new_password: str = Field(min_length=6, max_length=32)
+
 # ====== Enterprise Management ======
 class EnterpriseSaveRequest(BaseModel):
     code: int
@@ -170,7 +187,8 @@ class EnterpriseSaveRequest(BaseModel):
 
 # ====== Trace Report ======
 class TraceReportGenerateRequest(BaseModel):
-    pres_no: str
+    pres_no: Optional[str] = None
+    pres_no_list: Optional[List[str]] = None
 
 # ====== Stat Report ======
 class StatReportGenerateRequest(BaseModel):
