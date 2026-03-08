@@ -3,7 +3,7 @@ import { ElMessage } from 'element-plus'
 import router from '@/router'
 import { transformRequest, transformResponse } from '@/utils/apiMapper'
 
-const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/zyfh/api/v1'
+const baseURL = import.meta.env.VITE_API_BASE_URL || '/zyfh/api/v1'
 
 const instance = axios.create({
   baseURL,
