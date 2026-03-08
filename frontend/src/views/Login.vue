@@ -7,9 +7,9 @@
             <span class="title-icon">
               <HerbLeafIcon :size="24" />
             </span>
-            <h2>湖南省二附院饮片复核系统</h2>
+            <h2>成品复核系统</h2>
           </div>
-          <p>中药材管理系统登录</p>
+          <p>登录</p>
         </div>
       </template>
       <el-form ref="loginFormRef" :model="loginForm" :rules="rules" label-width="80px">
@@ -38,7 +38,8 @@
         </el-form-item>
       </el-form>
       <div class="login-tips">
-        <p>默认管理员账号：admin / admin123</p>
+        <p>测试用户名:fuhe/测试密码:fuhe123</p>
+        <p><b>春风得意马蹄疾，一日看尽长安花。</b></p>
       </div>
     </el-card>
   </div>

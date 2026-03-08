@@ -2,6 +2,34 @@ import { defineStore } from 'pinia'
 import { login as loginApi } from '@/api'
 import { ElMessage } from 'element-plus'
 
+const REVIEW_MODULE_KEYS = ['check', 'alert', 'basket', 'trace']
+
+const buildMenuPermissionMap = (roleName = '') => {
+  const normalizedRole = String(roleName || '').trim()
+  const isAdminRole = ['超级管理员', '系统管理员'].includes(normalizedRole)
+
+  const permission = {
+    dashboard: true,
+    qrcodeGenerate: true,
+    qrcodeManage: true,
+    check: false,
+    alert: false,
+    basket: false,
+    trace: false,
+    statistics: true,
+    profile: true,
+    system: true
+  }
+
+  if (isAdminRole) {
+    REVIEW_MODULE_KEYS.forEach((key) => {
+      permission[key] = true
+    })
+  }
+
+  return permission
+}
+
 export const useUserStore = defineStore('user', {
   state: () => ({
     token: localStorage.getItem('token') || '',
@@ -11,7 +39,15 @@ export const useUserStore = defineStore('user', {
   getters: {
     isLoggedIn: (state) => !!state.token,
     userName: (state) => state.userInfo.userName || '',
-    userRole: (state) => state.userInfo.roleName || ''
+    userRole: (state) => state.userInfo.roleName || '',
+    menuPermissions: (state) => buildMenuPermissionMap(state.userInfo.roleName),
+    canAccessMenu: (state) => {
+      const permissionMap = buildMenuPermissionMap(state.userInfo.roleName)
+      return (menuKey) => {
+        if (!menuKey) return true
+        return permissionMap[menuKey] !== false
+      }
+    }
   },
 
   actions: {

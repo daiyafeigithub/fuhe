@@ -1,6 +1,6 @@
 <template>
   <div class="qrcode-page">
-    <el-card class="module-card">
+    <el-card v-if="isGeneratePage" class="module-card">
       <template #header>
         <div class="card-header">
           <span>二维码生成</span>
@@ -103,28 +103,95 @@
         <p><strong>原始内容：</strong>{{ qrcodeContent }}</p>
         <p><strong>Base64编码：</strong>{{ base64Str }}</p>
         <el-button type="primary" @click="handleDownload">下载二维码</el-button>
+        <el-button type="success" :loading="printing" @click="handlePrint()">打印二维码</el-button>
       </div>
     </el-card>
 
-    <el-card class="module-card history-card">
+    <el-card v-if="isManagePage" class="module-card printer-card">
       <template #header>
-        <span>二维码历史记录</span>
+        <span>喷码枪打印配置</span>
       </template>
-      <el-table :data="historyList" stripe class="history-table">
+      <el-form :model="printerConfig" label-width="110px" class="printer-form">
+        <el-row :gutter="20">
+          <el-col :xs="24" :sm="24" :md="12" :lg="12">
+            <el-form-item label="打印机IP">
+              <el-input v-model="printerConfig.printerHost" placeholder="如：192.168.1.100（可留空仅生成指令）" />
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :sm="24" :md="12" :lg="12">
+            <el-form-item label="端口">
+              <el-input-number v-model="printerConfig.printerPort" :min="1" :max="65535" :step="1" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="20">
+          <el-col :xs="24" :sm="24" :md="12" :lg="12">
+            <el-form-item label="协议">
+              <el-select v-model="printerConfig.printerProtocol" style="width: 100%">
+                <el-option label="ZPL" value="zpl" />
+                <el-option label="TSPL" value="tspl" />
+                <el-option label="RAW" value="raw" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :sm="24" :md="12" :lg="12">
+            <el-form-item label="超时(秒)">
+              <el-input-number v-model="printerConfig.printerTimeout" :min="1" :max="30" :step="1" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="20">
+          <el-col :xs="24" :sm="24" :md="12" :lg="12">
+            <el-form-item label="打印份数">
+              <el-input-number v-model="printerConfig.copies" :min="1" :max="20" :step="1" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item class="printer-actions">
+          <el-button :loading="connectionTesting" @click="handleTestConnection">连接测试</el-button>
+          <el-button type="primary" plain @click="savePrinterConfig()">保存配置</el-button>
+          <el-button @click="resetPrinterConfig">恢复默认</el-button>
+        </el-form-item>
+      </el-form>
+    </el-card>
+
+    <el-card v-if="isManagePage" class="module-card history-card">
+      <template #header>
+        <div class="card-header">
+          <span>二维码历史记录</span>
+          <div class="history-actions">
+            <el-tag type="info" effect="plain">已选 {{ selectedHistoryRows.length }}</el-tag>
+            <el-button
+              type="success"
+              plain
+              size="small"
+              :loading="batchPrinting"
+              :disabled="selectedHistoryRows.length === 0 || printing"
+              @click="handleBatchPrint"
+            >
+              批量打印
+            </el-button>
+            <el-button size="small" @click="loadHistory">刷新</el-button>
+          </div>
+        </div>
+      </template>
+      <el-table :data="historyList" stripe class="history-table" row-key="qrcodeId" @selection-change="handleHistorySelectionChange">
+        <el-table-column type="selection" width="52" />
         <el-table-column prop="qrcodeId" label="二维码ID" />
         <el-table-column prop="cjId" label="院内编码" />
         <el-table-column prop="spec" label="规格" />
         <el-table-column prop="batchNo" label="批号" />
         <el-table-column prop="generateTime" label="生成时间" />
-        <el-table-column label="操作" width="150">
+        <el-table-column label="操作" width="220">
           <template #default="{ row }">
             <el-button link type="primary" @click="handleView(row)">查看</el-button>
+            <el-button link type="success" :loading="printing" :disabled="!row.qrcodeId || batchPrinting" @click="handlePrint(row)">打印</el-button>
           </template>
         </el-table-column>
       </el-table>
     </el-card>
 
-    <el-dialog v-model="batchDialogVisible" title="批量生成二维码" width="500px">
+    <el-dialog v-if="isGeneratePage" v-model="batchDialogVisible" title="批量生成二维码" width="500px">
       <el-form label-width="100px">
         <el-form-item label="批量数量">
           <el-input-number v-model="batchCount" :min="1" :max="100" />
@@ -144,21 +211,41 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
-import { generateQRCode, generateBatchQRCode, getQRCodeHistory, getEnterpriseList, getQrcodeDrugList } from '@/api'
+import { ref, reactive, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue'
+import { useRoute } from 'vue-router'
+import { generateQRCode, generateBatchQRCode, printMergedQRCode, testPrinterConnection, getQRCodeHistory, getEnterpriseList, getQrcodeDrugList } from '@/api'
 import { useUserStore } from '@/stores/user'
 import { ElMessage } from 'element-plus'
 
 const userStore = useUserStore()
+const route = useRoute()
+
+const pageMode = computed(() => route.meta?.qrcodeMode || (route.path.includes('/qrcode/manage') ? 'manage' : 'generate'))
+const isGeneratePage = computed(() => pageMode.value === 'generate')
+const isManagePage = computed(() => pageMode.value === 'manage')
 
 const formRef = ref(null)
 const generating = ref(false)
+const printing = ref(false)
+const batchPrinting = ref(false)
+const connectionTesting = ref(false)
 const qrcodeUrl = ref('')
 const qrcodeContent = ref('')
 const base64Str = ref('')
 const traceUrl = ref('')
+const latestQrcodeId = ref('')
 const batchDialogVisible = ref(false)
 const batchCount = ref(10)
+const selectedHistoryRows = ref([])
+const PRINTER_CONFIG_STORAGE_KEY = 'qrcodePrinterConfig'
+
+const printerConfig = reactive({
+  printerHost: '',
+  printerPort: 9100,
+  printerProtocol: 'zpl',
+  printerTimeout: 3,
+  copies: 1
+})
 
 const enterprises = ref([])
 const drugOptions = ref([])
@@ -367,8 +454,8 @@ const handleGenerate = async () => {
           qrcodeContent.value = res.data.qrcodeContent
           base64Str.value = res.data.base64Str
           traceUrl.value = res.data.traceUrl || form.traceUrl
+          latestQrcodeId.value = res.data.qrcodeId || ''
           ElMessage.success('生成成功')
-          loadHistory()
         } else {
           ElMessage.error(res.msg || '生成失败')
         }
@@ -389,6 +476,7 @@ const handleReset = () => {
   qrcodeContent.value = ''
   base64Str.value = ''
   traceUrl.value = ''
+  latestQrcodeId.value = ''
 }
 
 const handleDownload = () => {
@@ -397,6 +485,224 @@ const handleDownload = () => {
   link.href = qrcodeUrl.value
   link.download = 'qrcode.png'
   link.click()
+}
+
+const normalizePrinterConfig = () => {
+  const normalizedPort = Number(printerConfig.printerPort)
+  const normalizedTimeout = Number(printerConfig.printerTimeout)
+  const normalizedCopies = Number(printerConfig.copies)
+
+  printerConfig.printerHost = String(printerConfig.printerHost || '').trim()
+  printerConfig.printerPort = Number.isFinite(normalizedPort) ? Math.min(Math.max(Math.trunc(normalizedPort), 1), 65535) : 9100
+  printerConfig.printerTimeout = Number.isFinite(normalizedTimeout) ? Math.min(Math.max(Math.trunc(normalizedTimeout), 1), 30) : 3
+  printerConfig.copies = Number.isFinite(normalizedCopies) ? Math.min(Math.max(Math.trunc(normalizedCopies), 1), 20) : 1
+  if (!['zpl', 'tspl', 'raw'].includes(printerConfig.printerProtocol)) {
+    printerConfig.printerProtocol = 'zpl'
+  }
+}
+
+const loadPrinterConfig = () => {
+  try {
+    const raw = localStorage.getItem(PRINTER_CONFIG_STORAGE_KEY)
+    if (!raw) {
+      return
+    }
+
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') {
+      return
+    }
+
+    printerConfig.printerHost = parsed.printerHost || ''
+    printerConfig.printerPort = parsed.printerPort ?? 9100
+    printerConfig.printerProtocol = parsed.printerProtocol || 'zpl'
+    printerConfig.printerTimeout = parsed.printerTimeout ?? 3
+    printerConfig.copies = parsed.copies ?? 1
+    normalizePrinterConfig()
+  } catch {
+    printerConfig.printerHost = ''
+    printerConfig.printerPort = 9100
+    printerConfig.printerProtocol = 'zpl'
+    printerConfig.printerTimeout = 3
+    printerConfig.copies = 1
+  }
+}
+
+const savePrinterConfig = (showMessage = true) => {
+  normalizePrinterConfig()
+  localStorage.setItem(PRINTER_CONFIG_STORAGE_KEY, JSON.stringify({
+    printerHost: printerConfig.printerHost,
+    printerPort: printerConfig.printerPort,
+    printerProtocol: printerConfig.printerProtocol,
+    printerTimeout: printerConfig.printerTimeout,
+    copies: printerConfig.copies
+  }))
+  if (showMessage) {
+    ElMessage.success('打印配置已保存')
+  }
+}
+
+const resetPrinterConfig = () => {
+  printerConfig.printerHost = ''
+  printerConfig.printerPort = 9100
+  printerConfig.printerProtocol = 'zpl'
+  printerConfig.printerTimeout = 3
+  printerConfig.copies = 1
+  savePrinterConfig()
+}
+
+const handleTestConnection = async () => {
+  savePrinterConfig(false)
+
+  if (!printerConfig.printerHost) {
+    ElMessage.warning('请先填写打印机IP')
+    return
+  }
+
+  connectionTesting.value = true
+  try {
+    const res = await testPrinterConnection({
+      printerHost: printerConfig.printerHost,
+      printerPort: printerConfig.printerPort,
+      printerTimeout: printerConfig.printerTimeout
+    })
+
+    if (res.code === '0000') {
+      ElMessage.success(res.msg || '连接测试成功')
+      return
+    }
+
+    ElMessage.error(res.msg || '连接测试失败')
+  } catch (error) {
+    ElMessage.error('连接测试失败：' + error.message)
+  } finally {
+    connectionTesting.value = false
+  }
+}
+
+const handlePrint = async (row = null) => {
+  if (batchPrinting.value) {
+    ElMessage.warning('批量打印进行中，请稍后')
+    return
+  }
+
+  const targetQrcodeId = row?.qrcodeId || latestQrcodeId.value
+  const targetQrcodeContent = row?.qrcodeContent || qrcodeContent.value
+
+  if (!targetQrcodeId && !targetQrcodeContent) {
+    ElMessage.warning('暂无可打印的二维码')
+    return
+  }
+
+  printing.value = true
+  try {
+    savePrinterConfig(false)
+    const res = await printMergedQRCode({
+      qrcodeId: targetQrcodeId,
+      qrcodeContent: targetQrcodeContent,
+      copies: printerConfig.copies,
+      printerHost: printerConfig.printerHost,
+      printerPort: printerConfig.printerPort,
+      printerProtocol: printerConfig.printerProtocol,
+      printerTimeout: printerConfig.printerTimeout
+    })
+
+    if (res.code !== '0000') {
+      ElMessage.error(res.msg || '打印失败')
+      return
+    }
+
+    if (res.data?.sent) {
+      ElMessage.success(res.data?.message || '打印任务已发送')
+      return
+    }
+
+    const command = res.data?.command || ''
+    if (command && navigator?.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(command)
+        ElMessage.success((res.data?.message || '打印指令已生成') + '，指令已复制到剪贴板')
+        return
+      } catch (error) {
+        ElMessage.success(res.data?.message || '打印指令已生成')
+        return
+      }
+    }
+
+    ElMessage.success(res.data?.message || '打印指令已生成')
+  } catch (error) {
+    ElMessage.error('打印失败：' + error.message)
+  } finally {
+    printing.value = false
+  }
+}
+
+const handleHistorySelectionChange = (rows) => {
+  selectedHistoryRows.value = rows || []
+}
+
+const handleBatchPrint = async () => {
+  if (selectedHistoryRows.value.length === 0) {
+    ElMessage.warning('请先勾选需要打印的记录')
+    return
+  }
+
+  if (printing.value) {
+    ElMessage.warning('单条打印进行中，请稍后')
+    return
+  }
+
+  batchPrinting.value = true
+  savePrinterConfig(false)
+
+  let successCount = 0
+  let failCount = 0
+  const commandList = []
+
+  for (const row of selectedHistoryRows.value) {
+    try {
+      const res = await printMergedQRCode({
+        qrcodeId: row?.qrcodeId,
+        qrcodeContent: row?.qrcodeContent,
+        copies: printerConfig.copies,
+        printerHost: printerConfig.printerHost,
+        printerPort: printerConfig.printerPort,
+        printerProtocol: printerConfig.printerProtocol,
+        printerTimeout: printerConfig.printerTimeout
+      })
+
+      if (res.code !== '0000') {
+        failCount += 1
+        continue
+      }
+
+      successCount += 1
+      if (!res.data?.sent && res.data?.command) {
+        commandList.push(`# ${row?.qrcodeId || 'UNKNOWN'}\n${res.data.command}`)
+      }
+    } catch {
+      failCount += 1
+    }
+  }
+
+  if (commandList.length > 0 && navigator?.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(commandList.join('\n\n'))
+      ElMessage.success(`批量打印完成：成功 ${successCount} 条，失败 ${failCount} 条。打印指令已复制到剪贴板`)
+      batchPrinting.value = false
+      return
+    } catch {
+      // 忽略剪贴板失败，继续给出统计结果
+    }
+  }
+
+  if (failCount > 0) {
+    ElMessage.warning(`批量打印完成：成功 ${successCount} 条，失败 ${failCount} 条`)
+  } else {
+    ElMessage.success(`批量打印完成：成功 ${successCount} 条`)
+  }
+
+  batchPrinting.value = false
 }
 
 const handleBatchGenerate = () => {
@@ -435,7 +741,6 @@ const handleConfirmBatchGenerate = async () => {
     if (res.code === '0000') {
       ElMessage.success(`批量生成完成：成功 ${res.data.successNum} 条，失败 ${res.data.failNum} 条`)
       batchDialogVisible.value = false
-      loadHistory()
     } else {
       ElMessage.error(res.msg || '批量生成失败')
     }
@@ -451,6 +756,7 @@ const handleView = (row) => {
   qrcodeContent.value = row.qrcodeContent || row.qrcodeOrigin
   base64Str.value = row.base64Str
   traceUrl.value = row.traceUrl || ''
+  latestQrcodeId.value = row.qrcodeId || ''
 }
 
 const loadHistory = async () => {
@@ -468,6 +774,7 @@ const loadHistory = async () => {
             base64Str: item.base64Str,
             traceUrl: item.traceUrl
           }))
+          selectedHistoryRows.value = []
         } else {
           ElMessage.error(res.msg || '历史记录加载失败')
         }
@@ -476,9 +783,21 @@ const loadHistory = async () => {
   }
 }
 
+watch(
+  () => pageMode.value,
+  (mode) => {
+    if (mode === 'generate' && enterprises.value.length === 0) {
+      loadEnterprises()
+    }
+    if (mode === 'manage') {
+      loadHistory()
+    }
+  },
+  { immediate: true }
+)
+
 onMounted(() => {
-  loadEnterprises()
-  loadHistory()
+  loadPrinterConfig()
 })
 
 onBeforeUnmount(() => {
@@ -559,6 +878,20 @@ onBeforeUnmount(() => {
 .module-card :deep(.el-table) {
   border-radius: 6px;
   overflow: hidden;
+}
+
+.printer-form {
+  padding-top: 6px;
+}
+
+.printer-actions {
+  margin-bottom: 0;
+}
+
+.history-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 </style>

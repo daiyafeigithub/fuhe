@@ -87,6 +87,8 @@ export const generateQRCode = (data) => api.post('/qrcode/generate/single', {
   trace_url: data.traceUrl
 })
 export const generateBatchQRCode = (data) => api.post('/qrcode/generate/batch', data)
+export const printMergedQRCode = (data) => api.post('/qrcode/print', data)
+export const testPrinterConnection = (data) => api.post('/qrcode/print/test', data)
 export const verifyQRCode = (data) => api.post('/qrcode/verify', data)
 export const getQRCodeHistory = (params) => api.get('/qrcode/record/query', { params })
 export const getEnterpriseList = (params) => api.get('/qrcode/enterprise/list', { params })

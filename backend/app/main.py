@@ -17,6 +17,7 @@ import importlib
 import qrcode as qrcode_module
 from io import BytesIO
 import re
+import socket
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 try:
@@ -77,6 +78,22 @@ ensure_schema_compatibility()
 # 创建二维码图片存储目录
 QRCODE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "qrcodes")
 os.makedirs(QRCODE_DIR, exist_ok=True)
+
+try:
+    QRCODE_IMAGE_KEEP_COUNT = max(int(os.getenv("QRCODE_IMAGE_KEEP_COUNT", "10")), 1)
+except Exception:
+    QRCODE_IMAGE_KEEP_COUNT = 10
+
+DEFAULT_PRINTER_HOST = (os.getenv("INKJET_PRINTER_HOST", "") or "").strip()
+try:
+    DEFAULT_PRINTER_PORT = int(os.getenv("INKJET_PRINTER_PORT", "9100"))
+except Exception:
+    DEFAULT_PRINTER_PORT = 9100
+DEFAULT_PRINTER_PROTOCOL = (os.getenv("INKJET_PRINTER_PROTOCOL", "zpl") or "zpl").strip().lower()
+try:
+    DEFAULT_PRINTER_TIMEOUT = float(os.getenv("INKJET_PRINTER_TIMEOUT", "3"))
+except Exception:
+    DEFAULT_PRINTER_TIMEOUT = 3.0
 
 # 创建报告存储目录
 REPORT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "reports")
@@ -559,6 +576,10 @@ async def get_qrcode_image(qrcode_id: str, db: Session = Depends(get_db)):
     if not qrcode_record:
         raise HTTPException(status_code=404, detail="二维码图片不存在")
 
+    recent_ids = set(get_recent_qrcode_ids(db, QRCODE_IMAGE_KEEP_COUNT))
+    if qrcode_id not in recent_ids:
+        raise HTTPException(status_code=404, detail=f"二维码图片已归档，仅保留最近{QRCODE_IMAGE_KEEP_COUNT}条")
+
     try:
         review_base64 = qrcode_record.base64_str or encode_review_payload(qrcode_record.qrcode_origin)
         merged_qrcode_content = build_merged_qrcode_content(qrcode_record.trace_url or "", review_base64)
@@ -573,6 +594,7 @@ async def get_qrcode_image(qrcode_id: str, db: Session = Depends(get_db)):
 
         img = qr.make_image(fill_color="black", back_color="white")
         img.save(img_path)
+        prune_qrcode_image_files(db, QRCODE_IMAGE_KEEP_COUNT, force_keep=[qrcode_id])
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"二维码图片重建失败: {str(exc)[:120]}")
 
@@ -617,6 +639,123 @@ def error_response(code="5000", msg="服务器错误"):
         "timestamp": int(time.time() * 1000),
         "requestId": get_request_id()
     }
+
+
+def get_recent_qrcode_ids(db: Session, keep_count: int = QRCODE_IMAGE_KEEP_COUNT) -> List[str]:
+    """获取最近 keep_count 条二维码ID。"""
+    rows = db.query(models.QRCodeGenerate.qrcode_id).filter(
+        models.QRCodeGenerate.is_delete == 0
+    ).order_by(desc(models.QRCodeGenerate.generate_time)).limit(max(keep_count, 1)).all()
+    return [row[0] for row in rows if row and row[0]]
+
+
+def prune_qrcode_image_files(db: Session, keep_count: int = QRCODE_IMAGE_KEEP_COUNT, force_keep: Optional[List[str]] = None):
+    """清理二维码图片目录，仅保留最近 keep_count 条。"""
+    try:
+        keep_ids = set(get_recent_qrcode_ids(db, keep_count))
+        for item in (force_keep or []):
+            if item:
+                keep_ids.add(item)
+
+        if not os.path.exists(QRCODE_DIR):
+            return
+
+        for filename in os.listdir(QRCODE_DIR):
+            if not filename.lower().endswith(".png"):
+                continue
+            qrcode_id = filename[:-4]
+            if qrcode_id in keep_ids:
+                continue
+            file_path = os.path.join(QRCODE_DIR, filename)
+            try:
+                os.remove(file_path)
+            except Exception:
+                continue
+    except Exception as exc:
+        print(f"⚠️ 清理二维码图片失败: {str(exc)[:120]}")
+
+
+def sanitize_print_text(value: Optional[str], fallback: str = "QR-CODE") -> str:
+    """清洗打印文本，避免控制字符破坏指令。"""
+    raw = (value or "").replace("\r", " ").replace("\n", " ").strip()
+    return raw or fallback
+
+
+def build_zpl_print_command(qrcode_content: str, label_text: str, copies: int) -> str:
+    """构建 ZPL 打印指令。"""
+    safe_qr = (qrcode_content or "").replace("^", " ")
+    safe_label = sanitize_print_text(label_text).replace("^", " ")
+    return (
+        "^XA\n"
+        "^CI28\n"
+        "^PW720\n"
+        "^LL900\n"
+        f"^FO80,80^BQN,2,8^FDLA,{safe_qr}^FS\n"
+        f"^FO80,560^A0N,32,32^FD{safe_label}^FS\n"
+        f"^PQ{copies},0,1,N\n"
+        "^XZ\n"
+    )
+
+
+def build_tspl_print_command(qrcode_content: str, label_text: str, copies: int) -> str:
+    """构建 TSPL 打印指令。"""
+    safe_qr = (qrcode_content or "").replace('"', '""')
+    safe_label = sanitize_print_text(label_text).replace('"', '""')
+    return (
+        "SIZE 80 mm,60 mm\n"
+        "GAP 2 mm,0 mm\n"
+        "DIRECTION 1\n"
+        "CLS\n"
+        f"QRCODE 40,40,L,8,A,0,M2,S7,\"{safe_qr}\"\n"
+        f"TEXT 40,360,\"TSS24.BF2\",0,1,1,\"{safe_label}\"\n"
+        f"PRINT {copies},1\n"
+    )
+
+
+def build_qrcode_print_command(protocol: str, qrcode_content: str, label_text: str, copies: int) -> Tuple[str, str]:
+    """构建不同协议的二维码打印命令。"""
+    normalized_protocol = (protocol or "zpl").strip().lower()
+    normalized_copies = max(1, min(int(copies), 20))
+
+    if normalized_protocol in ["zpl", "inkjet", "inkjet_zpl"]:
+        return build_zpl_print_command(qrcode_content, label_text, normalized_copies), "zpl"
+    if normalized_protocol in ["tspl", "inkjet_tspl"]:
+        return build_tspl_print_command(qrcode_content, label_text, normalized_copies), "tspl"
+    if normalized_protocol in ["raw", "url"]:
+        return f"{qrcode_content}\n", "raw"
+
+    raise ValueError("仅支持 zpl / tspl / raw")
+
+
+def send_print_command(host: str, port: int, command: str, timeout: float):
+    """通过 TCP 下发打印指令（常见 9100 端口）。"""
+    with socket.create_connection((host, port), timeout=timeout) as sock:
+        sock.sendall(command.encode("utf-8", errors="ignore"))
+
+
+def build_qrcode_label_text(db: Session, record: Optional[models.QRCodeGenerate], custom_text: Optional[str]) -> str:
+    """构建打印文本，默认展示品名+规格（不可用时回退编码+规格）。"""
+    custom = sanitize_print_text(custom_text, fallback="")
+    if custom:
+        return custom
+
+    if not record:
+        return "QR-CODE"
+
+    medicine_name = ""
+    try:
+        cjid_value = int(str(record.cj_id).strip())
+        medicine = db.query(models.TCMMedicineDict).filter(
+            models.TCMMedicineDict.cjid == cjid_value,
+            models.TCMMedicineDict.status == 1
+        ).first()
+        medicine_name = medicine.medicine_name if medicine else ""
+    except Exception:
+        medicine_name = ""
+
+    if medicine_name:
+        return sanitize_print_text(f"{medicine_name} {record.spec or ''}")
+    return sanitize_print_text(f"CJID:{record.cj_id} {record.spec or ''}")
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -1123,6 +1262,8 @@ def generate_single_qrcode(req: schemas.QRGenerateRequest, db: Session = Depends
     except Exception as e:
         print(f"二维码图片生成失败: {e}")
 
+    prune_qrcode_image_files(db, QRCODE_IMAGE_KEEP_COUNT, force_keep=[qrcode_id])
+
     return success_response({
         "qrcode_id": qrcode_id,
         "qrcode_content": merged_qrcode_content,
@@ -1313,6 +1454,7 @@ def generate_batch_qrcode(payload: Any = Body(...), db: Session = Depends(get_db
             fail_count += 1
     
     db.commit()
+    prune_qrcode_image_files(db, QRCODE_IMAGE_KEEP_COUNT)
     
     return success_response({
         "success_num": success_count,
@@ -1320,6 +1462,118 @@ def generate_batch_qrcode(payload: Any = Body(...), db: Session = Depends(get_db
         "fail_list": fail_list,
         "download_url": None
     })
+
+
+@app.post("/zyfh/api/v1/qrcode/print")
+def print_qrcode(payload: dict = Body(...), db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """打印二合一二维码，支持喷码枪(ZPL/TSPL/RAW)。"""
+    qrcode_id = str(payload.get("qrcode_id") or payload.get("qrcodeId") or "").strip()
+    qrcode_content = str(payload.get("qrcode_content") or payload.get("qrcodeContent") or "").strip()
+    label_text = str(payload.get("label_text") or payload.get("labelText") or "").strip()
+
+    protocol = str(payload.get("printer_protocol") or payload.get("printerProtocol") or DEFAULT_PRINTER_PROTOCOL).strip().lower()
+    host = str(payload.get("printer_host") or payload.get("printerHost") or DEFAULT_PRINTER_HOST).strip()
+
+    try:
+        port = int(payload.get("printer_port") or payload.get("printerPort") or DEFAULT_PRINTER_PORT)
+    except Exception:
+        return error_response("1000", "打印机端口格式错误")
+
+    try:
+        timeout = float(payload.get("printer_timeout") or payload.get("printerTimeout") or DEFAULT_PRINTER_TIMEOUT)
+    except Exception:
+        timeout = DEFAULT_PRINTER_TIMEOUT
+
+    try:
+        copies = int(payload.get("copies") or 1)
+    except Exception:
+        copies = 1
+    copies = max(1, min(copies, 20))
+
+    qrcode_record: Optional[models.QRCodeGenerate] = None
+    if qrcode_id:
+        qrcode_record = db.query(models.QRCodeGenerate).filter(
+            models.QRCodeGenerate.qrcode_id == qrcode_id,
+            models.QRCodeGenerate.is_delete == 0
+        ).first()
+        if not qrcode_record:
+            return error_response("1000", "二维码记录不存在")
+
+        review_base64 = qrcode_record.base64_str or encode_review_payload(qrcode_record.qrcode_origin)
+        qrcode_content = build_merged_qrcode_content(qrcode_record.trace_url or "", review_base64)
+
+    if not qrcode_content:
+        return error_response("1000", "缺少二维码内容，需提供 qrcode_id 或 qrcode_content")
+
+    label = build_qrcode_label_text(db, qrcode_record, label_text)
+
+    try:
+        command, normalized_protocol = build_qrcode_print_command(protocol, qrcode_content, label, copies)
+    except Exception as exc:
+        return error_response("1000", f"打印协议错误: {str(exc)}")
+
+    sent = False
+    message = "未配置喷码枪地址，已返回打印指令"
+
+    if host:
+        if port <= 0 or port > 65535:
+            return error_response("1000", "打印机端口范围错误")
+        try:
+            send_print_command(host, port, command, timeout)
+            sent = True
+            message = f"打印任务已发送到喷码枪 {host}:{port}"
+        except Exception as exc:
+            return error_response("7000", f"喷码枪打印失败: {str(exc)[:120]}")
+
+    return success_response({
+        "qrcode_id": qrcode_record.qrcode_id if qrcode_record else qrcode_id or None,
+        "qrcode_content": qrcode_content,
+        "printer_protocol": normalized_protocol,
+        "printer_host": host or None,
+        "printer_port": port,
+        "copies": copies,
+        "sent": sent,
+        "message": message,
+        "command": command
+    }, "打印任务已发送" if sent else "打印指令已生成")
+
+
+@app.post("/zyfh/api/v1/qrcode/print/test")
+def test_qrcode_printer_connection(payload: dict = Body(...), current_user=Depends(get_current_user)):
+    """喷码枪连接测试（仅测试 TCP 连通性，不发送打印内容）。"""
+    host = str(payload.get("printer_host") or payload.get("printerHost") or DEFAULT_PRINTER_HOST).strip()
+
+    if not host:
+        return error_response("1000", "请先配置打印机IP")
+
+    try:
+        port = int(payload.get("printer_port") or payload.get("printerPort") or DEFAULT_PRINTER_PORT)
+    except Exception:
+        return error_response("1000", "打印机端口格式错误")
+
+    if port <= 0 or port > 65535:
+        return error_response("1000", "打印机端口范围错误")
+
+    try:
+        timeout = float(payload.get("printer_timeout") or payload.get("printerTimeout") or DEFAULT_PRINTER_TIMEOUT)
+    except Exception:
+        timeout = DEFAULT_PRINTER_TIMEOUT
+
+    if timeout <= 0:
+        timeout = DEFAULT_PRINTER_TIMEOUT
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            pass
+    except Exception as exc:
+        return error_response("7000", f"连接测试失败: {str(exc)[:120]}")
+
+    return success_response({
+        "printer_host": host,
+        "printer_port": port,
+        "printer_timeout": timeout,
+        "connected": True
+    }, "喷码枪连接测试成功")
 
 @app.post("/zyfh/api/v1/qrcode/parse")
 def parse_qrcode(payload: dict, db: Session = Depends(get_db)):

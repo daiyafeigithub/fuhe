@@ -20,23 +20,27 @@
           <el-icon><ModuleHerbIcon variant="dashboard" :size="16" /></el-icon>
           <span>工作台</span>
         </el-menu-item>
-        <el-menu-item index="/qrcode">
+        <el-menu-item v-if="canAccessMenu('qrcodeGenerate')" index="/qrcode/generate">
+          <el-icon><ModuleHerbIcon variant="qrcode" :size="16" /></el-icon>
+          <span>二维码生成</span>
+        </el-menu-item>
+        <el-menu-item v-if="canAccessMenu('qrcodeManage')" index="/qrcode/manage">
           <el-icon><ModuleHerbIcon variant="qrcode" :size="16" /></el-icon>
           <span>二维码管理</span>
         </el-menu-item>
-        <el-menu-item index="/check">
+        <el-menu-item v-if="canAccessMenu('check')" index="/check">
           <el-icon><ModuleHerbIcon variant="check" :size="16" /></el-icon>
           <span>扫码复核</span>
         </el-menu-item>
-        <el-menu-item index="/alert">
+        <el-menu-item v-if="canAccessMenu('alert')" index="/alert">
           <el-icon><ModuleHerbIcon variant="alert" :size="16" /></el-icon>
           <span>错误提醒</span>
         </el-menu-item>
-        <el-menu-item index="/basket">
+        <el-menu-item v-if="canAccessMenu('basket')" index="/basket">
           <el-icon><ModuleHerbIcon variant="basket" :size="16" /></el-icon>
           <span>分筐管理</span>
         </el-menu-item>
-        <el-menu-item index="/trace">
+        <el-menu-item v-if="canAccessMenu('trace')" index="/trace">
           <el-icon><ModuleHerbIcon variant="trace" :size="16" /></el-icon>
           <span>溯源管理</span>
         </el-menu-item>
@@ -44,7 +48,7 @@
           <el-icon><ModuleHerbIcon variant="statistics" :size="16" /></el-icon>
           <span>工作量统计</span>
         </el-menu-item>
-        <el-menu-item index="/system">
+        <el-menu-item v-if="canAccessMenu('system')" index="/system">
           <el-icon><ModuleHerbIcon variant="system" :size="16" /></el-icon>
           <span>系统管理</span>
         </el-menu-item>
@@ -102,6 +106,8 @@ const activeMenu = computed(() => route.path)
 const currentRoute = computed(() => route)
 const userName = computed(() => userStore.userName || '用户')
 const isCollapsed = ref(false)
+
+const canAccessMenu = (menuKey) => userStore.canAccessMenu(menuKey)
 
 const toggleSidebar = () => {
   isCollapsed.value = !isCollapsed.value
