@@ -1,4 +1,5 @@
 from sqlalchemy import create_engine
+from sqlalchemy.engine import URL
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
@@ -17,8 +18,20 @@ if USE_SQLITE:
     )
 else:
     # MySQL 数据库连接配置（生产/开发环境）
-    # 实际部署时应从环境变量读取敏感信息
-    DATABASE_URL = "mysql+pymysql://root:root@localhost:3306/zyyz_fuping"
+    mysql_host = os.getenv("MYSQL_HOST", "118.195.146.26")
+    mysql_port = int(os.getenv("MYSQL_PORT", "3306"))
+    mysql_db = os.getenv("MYSQL_DB", "zyyz_fuping")
+    mysql_user = os.getenv("MYSQL_USER", "root")
+    mysql_password = os.getenv("MYSQL_PASSWORD", "5130109319@ymxdr")
+
+    DATABASE_URL = URL.create(
+        "mysql+pymysql",
+        username=mysql_user,
+        password=mysql_password,
+        host=mysql_host,
+        port=mysql_port,
+        database=mysql_db,
+    )
     
     # 创建引擎，设置连接池和超时
     try:

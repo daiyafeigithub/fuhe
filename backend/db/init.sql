@@ -383,3 +383,22 @@ INSERT INTO sys_user_role (user_id, role_id, create_time, is_delete)
 SELECT u.id, r.id, NOW(), 0 FROM sys_user u, sys_role r
 WHERE u.user_account = 'admin' AND r.role_code = 'ADMIN'
 ON DUPLICATE KEY UPDATE create_time=VALUES(create_time);
+
+
+-- 创建中药材小包装字典表
+CREATE TABLE IF NOT EXISTS `tcm_medicine_dict` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+  `medicine_name` VARCHAR(100) NOT NULL COMMENT '药品品名',
+  `cjid` INT NOT NULL COMMENT 'CJID 编码',
+  `product_code` VARCHAR(50) DEFAULT NULL COMMENT '货号',
+  `specification` VARCHAR(50) DEFAULT NULL COMMENT '规格',
+  `unit` VARCHAR(20) DEFAULT '包' COMMENT '单位',
+  `status` TINYINT DEFAULT 1 COMMENT '状态：1-启用，0-禁用',
+  `create_time` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_cjid` (`cjid`),
+  KEY `idx_medicine_name` (`medicine_name`),
+  KEY `idx_product_code` (`product_code`),
+  KEY `idx_status` (`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='中药材小包装 CJID 字典表';

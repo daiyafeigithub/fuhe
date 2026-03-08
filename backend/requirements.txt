@@ -12,3 +12,4 @@ python-multipart
 PyJWT
 qrcode
 pillow
+pypinyin

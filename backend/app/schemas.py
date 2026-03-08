@@ -20,12 +20,14 @@ class QRGenerateRequest(BaseModel):
     batch_no: str
     num: int = 7
     weight: float
+    trace_url: Optional[str] = None
 
 class QRGenerateResponse(BaseModel):
     qrcode_id: str
     qrcode_content: str
     base64_str: str
     qrcode_url: str
+    trace_url: Optional[str] = None
 
 class QRParseResponse(BaseModel):
     qrcode_id: str

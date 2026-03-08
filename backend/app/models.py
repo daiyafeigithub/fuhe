@@ -32,6 +32,19 @@ class DrugInfo(Base):
     ext1 = Column(String(50))
     ext2 = Column(String(50))
 
+
+class TCMMedicineDict(Base):
+    __tablename__ = "tcm_medicine_dict"
+    id = Column(Integer, primary_key=True)
+    medicine_name = Column(String(100), nullable=False)
+    cjid = Column(Integer, unique=True, nullable=False)
+    product_code = Column(String(50))
+    specification = Column(String(50))
+    unit = Column(String(20), default="包")
+    status = Column(Integer, default=1)
+    create_time = Column(DateTime, default=datetime.utcnow)
+    update_time = Column(DateTime, default=datetime.utcnow)
+
 # ===== 二维码管理表 =====
 
 class QRCodeGenerate(Base):
@@ -46,6 +59,7 @@ class QRCodeGenerate(Base):
     weight = Column(Numeric(8, 4), nullable=False)
     qrcode_origin = Column(String(200), nullable=False)
     base64_str = Column(Text, nullable=False)
+    trace_url = Column(String(500))
     qrcode_url = Column(String(255), nullable=False)
     generate_by = Column(String(20), nullable=False)
     generate_time = Column(DateTime, default=datetime.utcnow)

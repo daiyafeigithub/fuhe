@@ -10,11 +10,20 @@ import jwt
 import json
 from datetime import datetime, timedelta
 import time
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 import os
 import sys
+import importlib
 import qrcode as qrcode_module
 from io import BytesIO
+import re
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+
+try:
+    _pypinyin_spec = importlib.util.find_spec("pypinyin")
+    lazy_pinyin = importlib.import_module("pypinyin").lazy_pinyin if _pypinyin_spec else None
+except Exception:
+    lazy_pinyin = None
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -30,27 +39,35 @@ def ensure_schema_compatibility():
     """兼容历史数据库结构，避免老库缺列导致 500。"""
     try:
         inspector = inspect(engine)
-        if "check_error_record" not in inspector.get_table_names():
-            return
+        table_names = set(inspector.get_table_names())
 
-        existing_columns = {column["name"] for column in inspector.get_columns("check_error_record")}
-        required_columns = {
-            "drug_name": "VARCHAR(50)",
-            "pres_spec": "VARCHAR(10)",
-            "scan_spec": "VARCHAR(10)",
-            "pres_num": "INTEGER",
-            "scan_num": "INTEGER",
-            "error_by": "VARCHAR(20)",
-            "handle_type": "VARCHAR(20)",
-            "handle_by": "VARCHAR(20)"
+        table_required_columns = {
+            "check_error_record": {
+                "drug_name": "VARCHAR(50)",
+                "pres_spec": "VARCHAR(10)",
+                "scan_spec": "VARCHAR(10)",
+                "pres_num": "INTEGER",
+                "scan_num": "INTEGER",
+                "error_by": "VARCHAR(20)",
+                "handle_type": "VARCHAR(20)",
+                "handle_by": "VARCHAR(20)"
+            },
+            "qrcode_generate_record": {
+                "trace_url": "VARCHAR(500)"
+            }
         }
 
         with engine.begin() as conn:
-            for column_name, column_type in required_columns.items():
-                if column_name in existing_columns:
+            for table_name, required_columns in table_required_columns.items():
+                if table_name not in table_names:
                     continue
-                conn.execute(text(f"ALTER TABLE check_error_record ADD COLUMN {column_name} {column_type}"))
-                print(f"✅ 自动补齐字段: check_error_record.{column_name}")
+
+                existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+                for column_name, column_type in required_columns.items():
+                    if column_name in existing_columns:
+                        continue
+                    conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"))
+                    print(f"✅ 自动补齐字段: {table_name}.{column_name}")
     except Exception as exc:
         print(f"⚠️ 数据库兼容检查失败: {str(exc)[:200]}")
 
@@ -446,28 +463,30 @@ def init_default_data():
                     create_by="system"
                 ))
 
-        enterprises = [
-            (1, '亳州市沪谯药业有限公司'),
-            (2, '湖南三湘中药饮片有限公司'),
-            (3, '长沙新林制药有限公司'),
-            (4, '安徽亳药千草中药饮片有限公司'),
-            (5, '北京仟草中药饮片有限公司'),
-            (6, '天津尚药堂制药有限公司')
-        ]
-        for code, name in enterprises:
-            enterprise = db.query(models.Enterprise).filter(models.Enterprise.enterprise_code == code).first()
-            if enterprise:
-                enterprise.enterprise_name = name
-                enterprise.status = 1
-                if enterprise.is_delete == 1:
-                    enterprise.is_delete = 0
-            else:
-                db.add(models.Enterprise(
-                    enterprise_code=code,
-                    enterprise_name=name,
-                    create_by="system",
-                    status=1
-                ))
+        target_enterprise_code = 4
+        target_enterprise_name = '安徽亳药千草中药饮片有限公司'
+        enterprise = db.query(models.Enterprise).filter(models.Enterprise.enterprise_code == target_enterprise_code).first()
+        if enterprise:
+            enterprise.enterprise_name = target_enterprise_name
+            enterprise.status = 1
+            if enterprise.is_delete == 1:
+                enterprise.is_delete = 0
+        else:
+            db.add(models.Enterprise(
+                enterprise_code=target_enterprise_code,
+                enterprise_name=target_enterprise_name,
+                create_by="system",
+                status=1
+            ))
+
+        db.query(models.Enterprise).filter(
+            models.Enterprise.enterprise_code != target_enterprise_code
+        ).update({
+            models.Enterprise.status: 0,
+            models.Enterprise.is_delete: 1,
+            models.Enterprise.update_by: "system",
+            models.Enterprise.update_time: datetime.utcnow()
+        }, synchronize_session=False)
 
         roles = [
             ("SUPER_ADMIN", "超级管理员", "ALL"),
@@ -541,13 +560,15 @@ async def get_qrcode_image(qrcode_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="二维码图片不存在")
 
     try:
+        review_base64 = qrcode_record.base64_str or encode_review_payload(qrcode_record.qrcode_origin)
+        merged_qrcode_content = build_merged_qrcode_content(qrcode_record.trace_url or "", review_base64)
         qr = qrcode_module.QRCode(
             version=1,
             error_correction=qrcode_module.constants.ERROR_CORRECT_L,
             box_size=10,
             border=4,
         )
-        qr.add_data(qrcode_record.qrcode_origin)
+        qr.add_data(merged_qrcode_content)
         qr.make(fit=True)
 
         img = qr.make_image(fill_color="black", back_color="white")
@@ -630,6 +651,163 @@ def verify_token(token: str) -> int:
 def hash_password(pwd: str) -> str:
     """密码 MD5 加密"""
     return hashlib.md5(pwd.encode()).hexdigest()
+
+
+def build_pinyin_sort_key(text: Optional[str]) -> str:
+    """生成中文拼音排序键；缺少依赖时回退原字符串。"""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+
+    if lazy_pinyin is None:
+        return raw.lower()
+
+    try:
+        return "".join(lazy_pinyin(raw)).lower()
+    except Exception:
+        return raw.lower()
+
+
+def build_pinyin_initials(text: Optional[str]) -> str:
+    """生成中文拼音首字母缩写；缺少依赖时回退原字符串。"""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+
+    if lazy_pinyin is None:
+        return raw.lower()
+
+    try:
+        syllables = lazy_pinyin(raw)
+        return "".join([item[0] for item in syllables if item]).lower()
+    except Exception:
+        return raw.lower()
+
+
+def normalize_search_keyword(keyword: Optional[str]) -> str:
+    """清洗搜索关键字，便于拼音和规格匹配。"""
+    return "".join((keyword or "").strip().lower().split())
+
+
+def build_spec_sort_key(specification: Optional[str]) -> Tuple[int, float, str]:
+    """规格排序键：优先按数字，再按原始文本。"""
+    raw = (specification or "").strip().lower()
+    if not raw:
+        return (2, float("inf"), "")
+
+    match = re.search(r"(\d+(?:\.\d+)?)", raw)
+    if not match:
+        return (1, float("inf"), raw)
+
+    try:
+        return (0, float(match.group(1)), raw)
+    except Exception:
+        return (1, float("inf"), raw)
+
+
+def compute_weight_by_spec(spec: str, num: int) -> float:
+    """按 规格(g) × 数量 ÷ 1000 自动计算重量(kg)。"""
+    normalized_spec = (spec or "").strip().lower()
+    if normalized_spec.endswith("g"):
+        normalized_spec = normalized_spec[:-1]
+
+    spec_value = float(normalized_spec)
+    if spec_value <= 0:
+        raise ValueError("规格必须大于0")
+    if num <= 0:
+        raise ValueError("数量必须大于0")
+
+    return round(spec_value * num / 1000, 4)
+
+
+def encode_review_payload(raw_content: str) -> str:
+    """将复核原文编码为 Base64 字符串。"""
+    try:
+        payload_bytes = raw_content.encode("gb2312")
+    except Exception:
+        payload_bytes = raw_content.encode("utf-8")
+    return base64.b64encode(payload_bytes).decode()
+
+
+def build_merged_qrcode_content(trace_url: str, review_base64: str) -> str:
+    """追溯链接 + q=复核Base64 二合一二维码内容。"""
+    normalized_trace_url = (trace_url or "").strip()
+    normalized_review_base64 = (review_base64 or "").strip()
+
+    if not normalized_trace_url:
+        return normalized_review_base64
+
+    if not normalized_review_base64:
+        return normalized_trace_url
+
+    split_result = urlsplit(normalized_trace_url)
+    query_pairs = parse_qsl(split_result.query, keep_blank_values=True)
+    query_pairs = [(k, v) for k, v in query_pairs if k.lower() != "q"]
+    query_pairs.append(("q", normalized_review_base64))
+
+    merged_query = urlencode(query_pairs, doseq=True)
+    return urlunsplit((
+        split_result.scheme,
+        split_result.netloc,
+        split_result.path,
+        merged_query,
+        split_result.fragment,
+    ))
+
+
+def decode_review_qrcode_content(content: str) -> Tuple[str, Optional[str], str]:
+    """兼容解析二维码内容，返回(复核原文, 追溯链接, 复核Base64)。"""
+    if not content:
+        raise ValueError("二维码内容为空")
+
+    source = content.strip()
+    trace_url: Optional[str] = None
+    review_token = source
+
+    if source.startswith("{") and source.endswith("}"):
+        try:
+            parsed = json.loads(source)
+            trace_url = parsed.get("traceUrl") or parsed.get("trace_url") or parsed.get("trace")
+            review_token = parsed.get("review") or parsed.get("reviewBase64") or parsed.get("review_base64") or ""
+            if not review_token:
+                raise ValueError("缺少复核编码字段")
+        except Exception as exc:
+            raise ValueError(f"二维码JSON格式无效: {str(exc)}")
+
+    elif source.startswith("http://") or source.startswith("https://"):
+        split_result = urlsplit(source)
+        query_pairs = parse_qsl(split_result.query, keep_blank_values=True)
+        review_values = [value for key, value in query_pairs if key.lower() == "q"]
+
+        if not review_values:
+            raise ValueError("二维码URL缺少q参数")
+
+        review_token = (review_values[-1] or "").strip()
+        if not review_token:
+            raise ValueError("二维码URL中的q参数为空")
+
+        filtered_query = [(k, v) for k, v in query_pairs if k.lower() != "q"]
+        trace_url = urlunsplit((
+            split_result.scheme,
+            split_result.netloc,
+            split_result.path,
+            urlencode(filtered_query, doseq=True),
+            split_result.fragment,
+        ))
+
+    if ";" in review_token and len(review_token.split(";")) >= 6:
+        raw_content = review_token
+        return raw_content, trace_url, encode_review_payload(raw_content)
+
+    try:
+        qrcode_bytes = base64.b64decode(review_token)
+        try:
+            raw_content = qrcode_bytes.decode("gb2312")
+        except Exception:
+            raw_content = qrcode_bytes.decode("utf-8")
+        return raw_content, trace_url, review_token
+    except Exception as exc:
+        raise ValueError(f"复核编码解析失败: {str(exc)}")
 
 
 def parse_datetime_value(value: Optional[str]) -> Optional[datetime]:
@@ -732,6 +910,9 @@ def health_check():
 @app.post("/zyfh/api/v1/qrcode/enterprise/save")
 def save_enterprise(req: schemas.EnterpriseSaveRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """新增/维护企业标志"""
+    if req.code != 4:
+        return error_response("1000", "当前仅支持维护企业编码4（安徽亳药千草中药饮片有限公司）")
+
     existing = db.query(models.Enterprise).filter(models.Enterprise.enterprise_code == req.code).first()
     if existing:
         existing.enterprise_name = req.name
@@ -752,11 +933,14 @@ def save_enterprise(req: schemas.EnterpriseSaveRequest, db: Session = Depends(ge
 @app.get("/zyfh/api/v1/qrcode/enterprise/list")
 def list_enterprises(status: int = None, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """查询企业列表"""
-    query = db.query(models.Enterprise)
+    query = db.query(models.Enterprise).filter(
+        models.Enterprise.is_delete == 0,
+        models.Enterprise.enterprise_code == 4
+    )
     if status is not None:
         query = query.filter(models.Enterprise.status == status)
     
-    enterprises = query.all()
+    enterprises = query.order_by(models.Enterprise.enterprise_code.asc()).all()
     result = []
     for enterprise in enterprises:
         result.append({
@@ -772,24 +956,105 @@ def list_enterprises(status: int = None, db: Session = Depends(get_db), current_
         "list": result
     })
 
+
+@app.get("/zyfh/api/v1/qrcode/drug/list")
+def list_qrcode_drugs(keyword: str = None, page: int = 1, size: int = 30,
+                     db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """院内编码查询：仅按品名+规格检索，按品名字典序排序，分页加载。"""
+    page = max(page, 1)
+    size = min(max(size, 10), 100)
+
+    query = db.query(models.TCMMedicineDict).filter(
+        models.TCMMedicineDict.status == 1
+    )
+
+    rows = query.all()
+    keyword_value = (keyword or "").strip()
+    if keyword_value:
+        keyword_lower = keyword_value.lower()
+        keyword_norm = normalize_search_keyword(keyword_value)
+        keyword_has_letters = any(ch.isalpha() for ch in keyword_norm)
+
+        def match_keyword(item: models.TCMMedicineDict) -> bool:
+            medicine_name = item.medicine_name or ""
+            specification = item.specification or ""
+
+            if keyword_value in medicine_name:
+                return True
+            if keyword_lower in specification.lower():
+                return True
+
+            if keyword_has_letters:
+                name_pinyin = build_pinyin_sort_key(medicine_name)
+                name_initials = build_pinyin_initials(medicine_name)
+                if keyword_norm in name_pinyin or keyword_norm in name_initials:
+                    return True
+
+            return False
+
+        rows = [item for item in rows if match_keyword(item)]
+
+    sorted_rows = sorted(
+        rows,
+        key=lambda item: (
+            build_pinyin_sort_key(item.medicine_name),
+            item.cjid,
+        )
+    )
+
+    total = len(sorted_rows)
+    start = (page - 1) * size
+    end = start + size
+    page_rows = sorted_rows[start:end]
+
+    return success_response({
+        "total": total,
+        "page": page,
+        "size": size,
+        "has_more": end < total,
+        "list": [
+            {
+                "cj_id": str(row.cjid),
+                "drug_name": row.medicine_name,
+                "spec_range": row.specification,
+                "display_name": f"{row.medicine_name} {row.specification or ''}".strip(),
+                "drug_type": row.product_code,
+                "unit": row.unit
+            }
+            for row in page_rows
+        ]
+    })
+
 @app.post("/zyfh/api/v1/qrcode/generate/single")
 def generate_single_qrcode(req: schemas.QRGenerateRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """二维码单条生成"""
     # 1. 验证企业编码
     enterprise = db.query(models.Enterprise).filter(
         models.Enterprise.enterprise_code == req.enterprise_code,
-        models.Enterprise.status == 1
+        models.Enterprise.status == 1,
+        models.Enterprise.is_delete == 0
     ).first()
-    if not enterprise:
-        return error_response("7000", "企业标志未维护或已禁用")
+    if not enterprise or req.enterprise_code != 4:
+        return error_response("7000", "当前仅支持企业：安徽亳药千草中药饮片有限公司")
     
-    # 2. 验证院内编码
-    drug = db.query(models.DrugInfo).filter(
-        models.DrugInfo.cj_id == req.cj_id,
-        models.DrugInfo.status == 1
+    # 2. 验证院内编码（来自 tcm_medicine_dict）
+    try:
+        cjid_value = int(str(req.cj_id).strip())
+    except Exception:
+        return error_response("1000", "院内编码格式错误，请输入数字编码")
+
+    drug = db.query(models.TCMMedicineDict).filter(
+        models.TCMMedicineDict.cjid == cjid_value,
+        models.TCMMedicineDict.status == 1
     ).first()
     if not drug:
         return error_response("1000", "院内编码无效，请核对")
+
+    trace_url = (req.trace_url or "").strip()
+    if not trace_url:
+        return error_response("1000", "追溯网址不能为空")
+    if not (trace_url.startswith("http://") or trace_url.startswith("https://")):
+        return error_response("1000", "追溯网址格式错误，应以 http:// 或 https:// 开头")
     
     # 3. 数据校验（根据 guide.md 要求）
     # 规格：必须为"数字+g"格式，数字1-30（含）
@@ -810,20 +1075,16 @@ def generate_single_qrcode(req: schemas.QRGenerateRequest, db: Session = Depends
     if req.num <= 0:
         return error_response("1000", "数量必须大于0")
     
-    # 重量：数字型，可保留1-4位小数，无单位（后台按kg存储）
-    if req.weight <= 0 or req.weight > 100:
-        return error_response("1000", "重量范围错误，应为0-100kg")
+    try:
+        auto_weight = compute_weight_by_spec(req.spec, req.num)
+    except Exception as exc:
+        return error_response("1000", f"重量自动计算失败: {str(exc)}")
     
     # 4. 生成二维码内容
-    qrcode_origin = f"{req.enterprise_code};{req.cj_id};{req.spec};{req.batch_no};{req.num};{req.weight}"
-    
-    # 5. 转换为 GB2312 再 Base64
-    try:
-        qrcode_bytes = qrcode_origin.encode("gb2312")
-    except:
-        qrcode_bytes = qrcode_origin.encode("utf-8")
-    
-    base64_str = base64.b64encode(qrcode_bytes).decode()
+    normalized_cj_id = str(cjid_value)
+    qrcode_origin = f"{req.enterprise_code};{normalized_cj_id};{req.spec};{req.batch_no};{req.num};{auto_weight:.4f}"
+    base64_str = encode_review_payload(qrcode_origin)
+    merged_qrcode_content = build_merged_qrcode_content(trace_url, base64_str)
     qrcode_id = f"QR{datetime.utcnow().strftime('%Y%m%d%H%M%S')}{int(time.time() % 1000)}"
     qrcode_url = f"/zyfh/qrcodes/{qrcode_id}.png"
     
@@ -831,13 +1092,14 @@ def generate_single_qrcode(req: schemas.QRGenerateRequest, db: Session = Depends
     qrcode = models.QRCodeGenerate(
         qrcode_id=qrcode_id,
         enterprise_code=req.enterprise_code,
-        cj_id=req.cj_id,
+        cj_id=normalized_cj_id,
         spec=req.spec,
         batch_no=req.batch_no,
         num=req.num,
-        weight=req.weight,
+        weight=auto_weight,
         qrcode_origin=qrcode_origin,
         base64_str=base64_str,
+        trace_url=trace_url,
         qrcode_url=qrcode_url,
         generate_by=current_user.user_account
     )
@@ -852,7 +1114,7 @@ def generate_single_qrcode(req: schemas.QRGenerateRequest, db: Session = Depends
             box_size=10,
             border=4,
         )
-        qr.add_data(qrcode_origin)
+        qr.add_data(merged_qrcode_content)
         qr.make(fit=True)
 
         img = qr.make_image(fill_color="black", back_color="white")
@@ -863,9 +1125,12 @@ def generate_single_qrcode(req: schemas.QRGenerateRequest, db: Session = Depends
 
     return success_response({
         "qrcode_id": qrcode_id,
-        "qrcode_content": qrcode_origin,
+        "qrcode_content": merged_qrcode_content,
+        "qrcode_origin": qrcode_origin,
         "base64_str": base64_str,
-        "qrcode_url": qrcode_url
+        "qrcode_url": qrcode_url,
+        "trace_url": trace_url,
+        "weight": auto_weight
     })
 
 @app.post("/zyfh/api/v1/qrcode/generate/batch")
@@ -899,18 +1164,36 @@ def generate_batch_qrcode(payload: Any = Body(...), db: Session = Depends(get_db
             qr_req_dict = qr_req.dict() if hasattr(qr_req, "dict") else qr_req.model_dump()
 
             # 验证企业编码
-            enterprise = db.query(models.Enterprise).filter(models.Enterprise.enterprise_code == qr_req.enterprise_code).first()
-            if not enterprise:
+            enterprise = db.query(models.Enterprise).filter(
+                models.Enterprise.enterprise_code == qr_req.enterprise_code,
+                models.Enterprise.status == 1,
+                models.Enterprise.is_delete == 0
+            ).first()
+            if not enterprise or qr_req.enterprise_code != 4:
                 fail_list.append({
                     "index": idx,
                     "params": qr_req_dict,
-                    "reason": "企业标志未维护"
+                    "reason": "当前仅支持企业：安徽亳药千草中药饮片有限公司"
                 })
                 fail_count += 1
                 continue
             
-            # 验证院内编码
-            drug = db.query(models.DrugInfo).filter(models.DrugInfo.cj_id == qr_req.cj_id).first()
+            # 验证院内编码（来自 tcm_medicine_dict）
+            try:
+                cjid_value = int(str(qr_req.cj_id).strip())
+            except Exception:
+                fail_list.append({
+                    "index": idx,
+                    "params": qr_req_dict,
+                    "reason": "院内编码格式错误，请输入数字编码"
+                })
+                fail_count += 1
+                continue
+
+            drug = db.query(models.TCMMedicineDict).filter(
+                models.TCMMedicineDict.cjid == cjid_value,
+                models.TCMMedicineDict.status == 1
+            ).first()
             if not drug:
                 fail_list.append({
                     "index": idx,
@@ -948,25 +1231,41 @@ def generate_batch_qrcode(payload: Any = Body(...), db: Session = Depends(get_db
                 fail_count += 1
                 continue
 
-            if qr_req.num <= 0 or qr_req.weight <= 0:
+            trace_url = (qr_req.trace_url or "").strip()
+            if not trace_url:
                 fail_list.append({
                     "index": idx,
                     "params": qr_req_dict,
-                    "reason": "数量和重量必须大于0"
+                    "reason": "追溯网址不能为空"
+                })
+                fail_count += 1
+                continue
+
+            if not (trace_url.startswith("http://") or trace_url.startswith("https://")):
+                fail_list.append({
+                    "index": idx,
+                    "params": qr_req_dict,
+                    "reason": "追溯网址格式错误，应以 http:// 或 https:// 开头"
+                })
+                fail_count += 1
+                continue
+
+            try:
+                auto_weight = compute_weight_by_spec(qr_req.spec, qr_req.num)
+            except Exception as exc:
+                fail_list.append({
+                    "index": idx,
+                    "params": qr_req_dict,
+                    "reason": f"重量自动计算失败: {str(exc)}"
                 })
                 fail_count += 1
                 continue
             
             # 生成二维码内容
-            qrcode_origin = f"{qr_req.enterprise_code};{qr_req.cj_id};{qr_req.spec};{qr_req.batch_no};{qr_req.num};{qr_req.weight}"
-            
-            # 转换为 GB2312 再 Base64
-            try:
-                qrcode_bytes = qrcode_origin.encode("gb2312")
-            except:
-                qrcode_bytes = qrcode_origin.encode("utf-8")
-            
-            base64_str = base64.b64encode(qrcode_bytes).decode()
+            normalized_cj_id = str(cjid_value)
+            qrcode_origin = f"{qr_req.enterprise_code};{normalized_cj_id};{qr_req.spec};{qr_req.batch_no};{qr_req.num};{auto_weight:.4f}"
+            base64_str = encode_review_payload(qrcode_origin)
+            merged_qrcode_content = build_merged_qrcode_content(trace_url, base64_str)
             qrcode_id = f"QR{datetime.utcnow().strftime('%Y%m%d%H%M%S')}{int(time.time() % 1000)}{idx:03d}"
             qrcode_url = f"/zyfh/qrcodes/{qrcode_id}.png"
             
@@ -974,13 +1273,14 @@ def generate_batch_qrcode(payload: Any = Body(...), db: Session = Depends(get_db
             qrcode = models.QRCodeGenerate(
                 qrcode_id=qrcode_id,
                 enterprise_code=qr_req.enterprise_code,
-                cj_id=qr_req.cj_id,
+                cj_id=normalized_cj_id,
                 spec=qr_req.spec,
                 batch_no=qr_req.batch_no,
                 num=qr_req.num,
-                weight=qr_req.weight,
+                weight=auto_weight,
                 qrcode_origin=qrcode_origin,
                 base64_str=base64_str,
+                trace_url=trace_url,
                 qrcode_url=qrcode_url,
                 generate_by=create_by
             )
@@ -993,7 +1293,7 @@ def generate_batch_qrcode(payload: Any = Body(...), db: Session = Depends(get_db
                     box_size=10,
                     border=4,
                 )
-                qr.add_data(qrcode_origin)
+                qr.add_data(merged_qrcode_content)
                 qr.make(fit=True)
 
                 img = qr.make_image(fill_color="black", back_color="white")
@@ -1024,24 +1324,19 @@ def generate_batch_qrcode(payload: Any = Body(...), db: Session = Depends(get_db
 @app.post("/zyfh/api/v1/qrcode/parse")
 def parse_qrcode(payload: dict, db: Session = Depends(get_db)):
     """解析二维码"""
-    base64_str = payload.get("qrcode_string")
-    if not base64_str:
+    qrcode_string = payload.get("qrcode_string")
+    if not qrcode_string:
         return error_response("1000", "缺少二维码参数")
-    
+
     try:
-        qrcode_bytes = base64.b64decode(base64_str)
-        # 尝试 GB2312 解码，失败回退 UTF-8
-        try:
-            raw = qrcode_bytes.decode("gb2312")
-        except:
-            raw = qrcode_bytes.decode("utf-8", errors="ignore")
+        review_raw, trace_url, review_base64 = decode_review_qrcode_content(qrcode_string)
     except Exception as e:
         return error_response("7000", f"二维码解析失败: {str(e)}")
-    
-    parts = raw.split(";")
+
+    parts = review_raw.split(";")
     if len(parts) < 6:
         return error_response("7000", "二维码格式无效")
-    
+
     try:
         result = {
             "enterprise_code": int(parts[0]),
@@ -1050,7 +1345,9 @@ def parse_qrcode(payload: dict, db: Session = Depends(get_db)):
             "batch_no": parts[3],
             "num": int(parts[4]),
             "weight": float(parts[5]),
-            "raw": raw
+            "raw": review_raw,
+            "trace_url": trace_url,
+            "review_base64": review_base64
         }
         return success_response(result)
     except Exception as e:
@@ -1059,19 +1356,15 @@ def parse_qrcode(payload: dict, db: Session = Depends(get_db)):
 @app.post("/zyfh/api/v1/qrcode/verify")
 def verify_qrcode(payload: dict, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """二维码校验"""
-    base64_str = payload.get("qrcode_content")
-    if not base64_str:
+    qrcode_content = payload.get("qrcode_content")
+    if not qrcode_content:
         return error_response("1000", "缺少二维码参数")
-    
+
     # 解析二维码
     try:
-        qrcode_bytes = base64.b64decode(base64_str)
-        try:
-            decrypt_content = qrcode_bytes.decode("gb2312")
-        except:
-            decrypt_content = qrcode_bytes.decode("utf-8")
-    except:
-        return error_response("7000", "二维码解析失败")
+        decrypt_content, trace_url, review_base64 = decode_review_qrcode_content(qrcode_content)
+    except Exception as exc:
+        return error_response("7000", f"二维码解析失败: {str(exc)}")
     
     # 查询原始记录
     original = db.query(models.QRCodeGenerate).filter(
@@ -1084,7 +1377,7 @@ def verify_qrcode(payload: dict, db: Session = Depends(get_db), current_user=Dep
     # 保存校验记录
     record = models.QRCodeVerify(
         qrcode_id=original.qrcode_id if original else "UNKNOWN",
-        verify_base64=base64_str,
+        verify_base64=qrcode_content,
         decrypt_origin=decrypt_content,
         verify_result=verify_result,
         verify_reason=verify_reason,
@@ -1096,7 +1389,9 @@ def verify_qrcode(payload: dict, db: Session = Depends(get_db), current_user=Dep
     return success_response({
         "decryptContent": decrypt_content,
         "verifyResult": verify_result,
-        "verifyReason": verify_reason
+        "verifyReason": verify_reason,
+        "traceUrl": trace_url,
+        "reviewBase64": review_base64
     })
 
 @app.get("/zyfh/api/v1/qrcode/record/query")
@@ -1107,7 +1402,7 @@ def query_qrcode_records(enterprise_code: int = None, cj_id: str = None,
                         db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """二维码历史记录查询（分页）"""
     # 查询生成记录
-    query_generate = db.query(models.QRCodeGenerate)
+    query_generate = db.query(models.QRCodeGenerate).filter(models.QRCodeGenerate.is_delete == 0)
     if enterprise_code:
         query_generate = query_generate.filter(models.QRCodeGenerate.enterprise_code == enterprise_code)
     if cj_id:
@@ -1142,7 +1437,9 @@ def query_qrcode_records(enterprise_code: int = None, cj_id: str = None,
             "generate_time": rec.generate_time.isoformat() if rec.generate_time else None,
             "qrcode_url": rec.qrcode_url,
             "qrcode_origin": rec.qrcode_origin,
-            "base64_str": rec.base64_str
+            "base64_str": rec.base64_str,
+            "trace_url": rec.trace_url,
+            "qrcode_content": build_merged_qrcode_content(rec.trace_url or "", rec.base64_str)
         })
     
     for rec in verify_records:
@@ -1391,17 +1688,13 @@ def scan_check(req: schemas.ScanCheckRequest, db: Session = Depends(get_db), cur
     if check_main.check_status == 2:
         return error_response("8000", "该处方已复核完成，不可再扫码")
     
-    # 4. 解析二维码
+    # 4. 解析二维码（兼容旧版与新二合一内容）
     try:
-        qrcode_bytes = base64.b64decode(req.qrcode_content)
-        try:
-            raw = qrcode_bytes.decode("gb2312")
-        except:
-            raw = qrcode_bytes.decode("utf-8")
+        review_raw, trace_url, review_base64 = decode_review_qrcode_content(req.qrcode_content)
     except Exception as e:
         return error_response("7000", f"二维码解析失败: {str(e)}")
-    
-    parts = raw.split(";")
+
+    parts = review_raw.split(";")
     if len(parts) < 6:
         return error_response("7000", "二维码格式无效")
     

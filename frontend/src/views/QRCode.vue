@@ -14,20 +14,46 @@
               <el-select v-model="form.enterpriseCode" placeholder="请选择企业" style="width: 100%">
                 <el-option
                   v-for="ent in enterprises"
-                  :key="ent.code"
-                  :label="ent.name"
-                  :value="ent.code"
+                  :key="ent.enterpriseCode"
+                  :label="ent.enterpriseName"
+                  :value="ent.enterpriseCode"
                 />
               </el-select>
             </el-form-item>
           </el-col>
           <el-col :xs="24" :sm="24" :md="12" :lg="12">
-            <el-form-item label="院内编码" prop="cjId">
-              <el-input v-model="form.cjId" placeholder="请输入院内编码" />
+            <el-form-item label="院内品名" prop="cjId">
+              <el-select
+                v-model="form.cjId"
+                filterable
+                remote
+                clearable
+                reserve-keyword
+                style="width: 100%"
+                placeholder="请输入品名或规格（支持拼音）"
+                popper-class="drug-select-dropdown"
+                :remote-method="handleDrugSearch"
+                :loading="drugLoading"
+                @change="handleDrugChange"
+                @clear="handleDrugClear"
+                @visible-change="handleDrugDropdownVisible"
+              >
+                <el-option
+                  v-for="item in drugOptions"
+                  :key="item.cjId"
+                  :label="buildDrugOptionLabel(item)"
+                  :value="item.cjId"
+                />
+              </el-select>
             </el-form-item>
           </el-col>
         </el-row>
         <el-row :gutter="20" class="form-row">
+          <el-col :xs="24" :sm="24" :md="12" :lg="12">
+            <el-form-item label="院内编码">
+              <el-input v-model="form.cjId" readonly placeholder="选择品名后自动带出编码" />
+            </el-form-item>
+          </el-col>
           <el-col :xs="24" :sm="24" :md="12" :lg="12">
             <el-form-item label="规格" prop="spec">
               <el-input v-model="form.spec" placeholder="如：5g">
@@ -35,9 +61,16 @@
               </el-input>
             </el-form-item>
           </el-col>
+        </el-row>
+        <el-row :gutter="20" class="form-row">
           <el-col :xs="24" :sm="24" :md="12" :lg="12">
             <el-form-item label="批号" prop="batchNo">
               <el-input v-model="form.batchNo" placeholder="5-10位数字" />
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :sm="24" :md="12" :lg="12">
+            <el-form-item label="追溯网址" prop="traceUrl">
+              <el-input v-model="form.traceUrl" placeholder="如：https://trace.example.com/xxx" />
             </el-form-item>
           </el-col>
         </el-row>
@@ -48,8 +81,8 @@
             </el-form-item>
           </el-col>
           <el-col :xs="24" :sm="24" :md="12" :lg="12">
-            <el-form-item label="重量(kg)" prop="weight">
-              <el-input-number v-model="form.weight" :min="0" :precision="4" style="width: 100%" />
+            <el-form-item label="重量(kg)">
+              <el-input-number v-model="form.weight" :min="0" :precision="4" style="width: 100%" :controls="false" readonly />
             </el-form-item>
           </el-col>
         </el-row>
@@ -66,6 +99,7 @@
         <div class="qrcode-preview">
           <img :src="qrcodeUrl" alt="二维码" />
         </div>
+        <p><strong>追溯网址：</strong>{{ traceUrl }}</p>
         <p><strong>原始内容：</strong>{{ qrcodeContent }}</p>
         <p><strong>Base64编码：</strong>{{ base64Str }}</p>
         <el-button type="primary" @click="handleDownload">下载二维码</el-button>
@@ -110,8 +144,8 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
-import { generateQRCode, generateBatchQRCode, getQRCodeHistory } from '@/api'
+import { ref, reactive, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import { generateQRCode, generateBatchQRCode, getQRCodeHistory, getEnterpriseList, getQrcodeDrugList } from '@/api'
 import { useUserStore } from '@/stores/user'
 import { ElMessage } from 'element-plus'
 
@@ -122,17 +156,19 @@ const generating = ref(false)
 const qrcodeUrl = ref('')
 const qrcodeContent = ref('')
 const base64Str = ref('')
+const traceUrl = ref('')
 const batchDialogVisible = ref(false)
 const batchCount = ref(10)
 
-const enterprises = ref([
-  { code: 1, name: '亳州市沪谯药业有限公司' },
-  { code: 2, name: '湖南三湘中药饮片有限公司' },
-  { code: 3, name: '长沙新林制药有限公司' },
-  { code: 4, name: '安徽亳药千草中药饮片有限公司' },
-  { code: 5, name: '北京仟草中药饮片有限公司' },
-  { code: 6, name: '天津尚药堂制药有限公司' }
-])
+const enterprises = ref([])
+const drugOptions = ref([])
+const drugLoading = ref(false)
+const drugLoadingMore = ref(false)
+const drugKeyword = ref('')
+const drugPage = ref(1)
+const drugHasMore = ref(true)
+const DRUG_PAGE_SIZE = 30
+let drugDropdownWrapEl = null
 
 const form = reactive({
   enterpriseCode: '',
@@ -140,12 +176,13 @@ const form = reactive({
   spec: '',
   batchNo: '',
   num: 7,
-  weight: 0
+  weight: 0,
+  traceUrl: ''
 })
 
 const rules = {
   enterpriseCode: [{ required: true, message: '请选择企业', trigger: 'change' }],
-  cjId: [{ required: true, message: '请输入院内编码', trigger: 'blur' }],
+  cjId: [{ required: true, message: '请选择院内品名', trigger: 'change' }],
   spec: [
     { required: true, message: '请输入规格', trigger: 'blur' },
     { pattern: /^\d+(\.\d+)?$/, message: '规格必须为数字', trigger: 'blur' }
@@ -153,10 +190,166 @@ const rules = {
   batchNo: [
     { required: true, message: '请输入批号', trigger: 'blur' },
     { pattern: /^\d{5,10}$/, message: '批号为5-10位数字', trigger: 'blur' }
+  ],
+  traceUrl: [
+    { required: true, message: '请输入追溯网址', trigger: 'blur' },
+    { pattern: /^https?:\/\//, message: '追溯网址需以 http:// 或 https:// 开头', trigger: 'blur' }
   ]
 }
 
 const historyList = ref([])
+
+const calculateWeight = () => {
+  const specNum = Number(form.spec)
+  const num = Number(form.num)
+  if (!Number.isFinite(specNum) || specNum <= 0 || !Number.isFinite(num) || num <= 0) {
+    form.weight = 0
+    return
+  }
+  form.weight = Number((specNum * num / 1000).toFixed(4))
+}
+
+watch(() => [form.spec, form.num], calculateWeight, { immediate: true })
+
+const unbindDrugDropdownScroll = () => {
+  if (drugDropdownWrapEl) {
+    drugDropdownWrapEl.removeEventListener('scroll', handleDrugDropdownScroll)
+    drugDropdownWrapEl = null
+  }
+}
+
+const bindDrugDropdownScroll = async () => {
+  await nextTick()
+  const wrap = document.querySelector('.drug-select-dropdown .el-select-dropdown__wrap')
+  if (!wrap || wrap === drugDropdownWrapEl) return
+  unbindDrugDropdownScroll()
+  drugDropdownWrapEl = wrap
+  drugDropdownWrapEl.addEventListener('scroll', handleDrugDropdownScroll)
+}
+
+const fetchDrugOptions = async ({ append = false } = {}) => {
+  if (append) {
+    if (drugLoadingMore.value || !drugHasMore.value) return
+    drugLoadingMore.value = true
+  } else {
+    drugLoading.value = true
+  }
+
+  try {
+    const res = await getQrcodeDrugList({
+      keyword: drugKeyword.value,
+      page: drugPage.value,
+      size: DRUG_PAGE_SIZE
+    })
+    if (res.code !== '0000') {
+      ElMessage.error(res.msg || '院内药品加载失败')
+      return
+    }
+
+    const list = (res.data?.list || []).map(item => ({
+      cjId: item.cjId,
+      drugName: item.drugName,
+      specRange: item.specRange,
+      displayName: item.displayName || `${item.drugName || ''} ${item.specRange || ''}`.trim()
+    }))
+
+    if (append) {
+      const exists = new Set(drugOptions.value.map(item => item.cjId))
+      drugOptions.value = drugOptions.value.concat(list.filter(item => !exists.has(item.cjId)))
+    } else {
+      drugOptions.value = list
+    }
+
+    drugHasMore.value = !!res.data?.hasMore
+  } catch (error) {
+    ElMessage.error('院内药品加载失败：' + error.message)
+  } finally {
+    if (append) {
+      drugLoadingMore.value = false
+    } else {
+      drugLoading.value = false
+    }
+  }
+}
+
+const buildDrugOptionLabel = (item) => {
+  if (!item) return ''
+  return item.displayName || `${item.drugName || ''} ${item.specRange || ''}`.trim()
+}
+
+const extractSpecValue = (specRange) => {
+  const raw = String(specRange || '').trim().toLowerCase()
+  if (!raw) return ''
+
+  const gMatch = raw.match(/(\d+(?:\.\d+)?)\s*g/)
+  if (gMatch?.[1]) return gMatch[1]
+
+  const numberMatch = raw.match(/(\d+(?:\.\d+)?)/)
+  if (numberMatch?.[1]) return numberMatch[1]
+
+  return ''
+}
+
+const handleDrugSearch = (query) => {
+  drugKeyword.value = (query || '').trim()
+  drugPage.value = 1
+  drugHasMore.value = true
+  fetchDrugOptions({ append: false })
+}
+
+const handleDrugDropdownScroll = () => {
+  if (!drugDropdownWrapEl || drugLoading.value || drugLoadingMore.value || !drugHasMore.value) return
+  const nearBottom = drugDropdownWrapEl.scrollHeight - (drugDropdownWrapEl.scrollTop + drugDropdownWrapEl.clientHeight) <= 12
+  if (!nearBottom) return
+  drugPage.value += 1
+  fetchDrugOptions({ append: true })
+}
+
+const handleDrugDropdownVisible = (visible) => {
+  if (!visible) {
+    unbindDrugDropdownScroll()
+    return
+  }
+  bindDrugDropdownScroll()
+  if (drugOptions.value.length === 0) {
+    drugPage.value = 1
+    drugHasMore.value = true
+    fetchDrugOptions({ append: false })
+  }
+}
+
+const handleDrugChange = (value) => {
+  if (!value) {
+    form.cjId = ''
+    form.spec = ''
+    return
+  }
+
+  const selected = drugOptions.value.find(item => item.cjId === value)
+  form.cjId = selected?.cjId || String(value)
+  form.spec = extractSpecValue(selected?.specRange)
+}
+
+const handleDrugClear = () => {
+  form.cjId = ''
+  form.spec = ''
+}
+
+const loadEnterprises = async () => {
+  try {
+    const res = await getEnterpriseList({ status: 1 })
+    if (res.code !== '0000') {
+      ElMessage.error(res.msg || '企业列表加载失败')
+      return
+    }
+    enterprises.value = res.data?.list || []
+    if (!form.enterpriseCode && enterprises.value.length > 0) {
+      form.enterpriseCode = enterprises.value[0].enterpriseCode
+    }
+  } catch (error) {
+    ElMessage.error('企业列表加载失败：' + error.message)
+  }
+}
 
 const handleGenerate = async () => {
   if (!formRef.value) return
@@ -164,13 +357,16 @@ const handleGenerate = async () => {
     if (valid) {
       generating.value = true
       try {
-        const data = { ...form, spec: form.spec + 'g', createBy: 'current_user' }
-        data.createBy = userStore.userInfo.userAccount || 'admin'
+        const data = {
+          ...form,
+          spec: form.spec + 'g'
+        }
         const res = await generateQRCode(data)
         if (res.code === '0000') {
           qrcodeUrl.value = res.data.qrcodeUrl
           qrcodeContent.value = res.data.qrcodeContent
           base64Str.value = res.data.base64Str
+          traceUrl.value = res.data.traceUrl || form.traceUrl
           ElMessage.success('生成成功')
           loadHistory()
         } else {
@@ -192,6 +388,7 @@ const handleReset = () => {
   qrcodeUrl.value = ''
   qrcodeContent.value = ''
   base64Str.value = ''
+  traceUrl.value = ''
 }
 
 const handleDownload = () => {
@@ -203,7 +400,7 @@ const handleDownload = () => {
 }
 
 const handleBatchGenerate = () => {
-  if (!form.enterpriseCode || !form.cjId || !form.spec || !form.batchNo || !form.num || !form.weight) {
+  if (!form.enterpriseCode || !form.cjId || !form.spec || !form.batchNo || !form.num || !form.traceUrl) {
     ElMessage.warning('请先完善上方二维码参数后再批量生成')
     return
   }
@@ -225,7 +422,8 @@ const handleConfirmBatchGenerate = async () => {
         spec: form.spec + 'g',
         batchNo,
         num: form.num,
-        weight: form.weight
+        weight: form.weight,
+        traceUrl: form.traceUrl
       }
     })
 
@@ -250,8 +448,9 @@ const handleConfirmBatchGenerate = async () => {
 
 const handleView = (row) => {
   qrcodeUrl.value = row.qrcodeUrl
-  qrcodeContent.value = row.qrcodeContent
+  qrcodeContent.value = row.qrcodeContent || row.qrcodeOrigin
   base64Str.value = row.base64Str
+  traceUrl.value = row.traceUrl || ''
 }
 
 const loadHistory = async () => {
@@ -265,8 +464,9 @@ const loadHistory = async () => {
             batchNo: item.batchNo,
             generateTime: item.generateTime,
             qrcodeUrl: item.qrcodeUrl,
-            qrcodeContent: item.qrcodeOrigin,
-            base64Str: item.base64Str
+            qrcodeContent: item.qrcodeContent || item.qrcodeOrigin,
+            base64Str: item.base64Str,
+            traceUrl: item.traceUrl
           }))
         } else {
           ElMessage.error(res.msg || '历史记录加载失败')
@@ -277,7 +477,12 @@ const loadHistory = async () => {
 }
 
 onMounted(() => {
+  loadEnterprises()
   loadHistory()
+})
+
+onBeforeUnmount(() => {
+  unbindDrugDropdownScroll()
 })
 </script>
 
@@ -355,4 +560,5 @@ onMounted(() => {
   border-radius: 6px;
   overflow: hidden;
 }
+
 </style>

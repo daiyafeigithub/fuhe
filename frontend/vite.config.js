@@ -10,6 +10,14 @@ export default defineConfig({
       '/zyfh/api': {
         target: 'http://localhost:8000',
         changeOrigin: true
+      },
+      '/zyfh/qrcodes': {
+        target: 'http://localhost:8000',
+        changeOrigin: true
+      },
+      '/zyfh/reports': {
+        target: 'http://localhost:8000',
+        changeOrigin: true
       }
     }
   },

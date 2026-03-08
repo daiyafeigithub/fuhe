@@ -83,11 +83,14 @@ export const generateQRCode = (data) => api.post('/qrcode/generate/single', {
   spec: data.spec,
   batch_no: data.batchNo,
   num: data.num,
-  weight: data.weight
+  weight: data.weight,
+  trace_url: data.traceUrl
 })
 export const generateBatchQRCode = (data) => api.post('/qrcode/generate/batch', data)
 export const verifyQRCode = (data) => api.post('/qrcode/verify', data)
 export const getQRCodeHistory = (params) => api.get('/qrcode/record/query', { params })
+export const getEnterpriseList = (params) => api.get('/qrcode/enterprise/list', { params })
+export const getQrcodeDrugList = (params) => api.get('/qrcode/drug/list', { params })
 
 export const initCheck = (data) => api.post('/check/init', data)
 export const scanCheck = (data) => api.post('/check/scan', data)
