@@ -395,17 +395,34 @@ def init_default_data():
     from app.database import SessionLocal
     db = SessionLocal()
     try:
+        admin_pwd_hash = hashlib.md5("admin123".encode()).hexdigest()
+        force_reset_admin_password = os.getenv("RESET_ADMIN_PASSWORD", "false").lower() == "true"
         admin_user = db.query(models.SysUser).filter(models.SysUser.user_account == "admin").first()
         if not admin_user:
             db.add(models.SysUser(
                 user_account="admin",
                 user_name="超级管理员",
-                user_pwd=hashlib.md5("admin123".encode()).hexdigest(),
+                user_pwd=admin_pwd_hash,
                 dept_name="系统管理",
                 post="系统管理员",
                 status=1,
                 create_by="system"
             ))
+        else:
+            if admin_user.is_delete == 1:
+                admin_user.is_delete = 0
+            if admin_user.status == 0:
+                admin_user.status = 1
+            if not admin_user.user_name:
+                admin_user.user_name = "超级管理员"
+            if not admin_user.dept_name:
+                admin_user.dept_name = "系统管理"
+            if not admin_user.post:
+                admin_user.post = "系统管理员"
+            if force_reset_admin_password or not admin_user.user_pwd:
+                admin_user.user_pwd = admin_pwd_hash
+                admin_user.update_by = "system"
+                admin_user.update_time = datetime.utcnow()
 
         review_users = [
             ("fh001", "复核员一", "中药房", "复核员", "13800138001"),
@@ -483,6 +500,8 @@ def init_default_data():
         db.commit()
         print("✅ 默认数据初始化成功")
         print("   默认管理员账号: admin / admin123")
+        if force_reset_admin_password:
+            print("   已按环境变量 RESET_ADMIN_PASSWORD=true 重置管理员密码")
     except Exception as e:
         db.rollback()
         print(f"⚠️ 初始化数据失败: {str(e)[:200]}")
@@ -507,13 +526,39 @@ if os.path.exists(frontend_path):
 
 # 二维码图片访问路由
 @app.get("/zyfh/qrcodes/{qrcode_id}.png")
-async def get_qrcode_image(qrcode_id: str):
+async def get_qrcode_image(qrcode_id: str, db: Session = Depends(get_db)):
     """获取二维码图片"""
     img_path = os.path.join(QRCODE_DIR, f"{qrcode_id}.png")
     if os.path.exists(img_path):
         return FileResponse(img_path, media_type="image/png")
-    else:
+
+    qrcode_record = db.query(models.QRCodeGenerate).filter(
+        models.QRCodeGenerate.qrcode_id == qrcode_id,
+        models.QRCodeGenerate.is_delete == 0
+    ).first()
+
+    if not qrcode_record:
         raise HTTPException(status_code=404, detail="二维码图片不存在")
+
+    try:
+        qr = qrcode_module.QRCode(
+            version=1,
+            error_correction=qrcode_module.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(qrcode_record.qrcode_origin)
+        qr.make(fit=True)
+
+        img = qr.make_image(fill_color="black", back_color="white")
+        img.save(img_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"二维码图片重建失败: {str(exc)[:120]}")
+
+    if os.path.exists(img_path):
+        return FileResponse(img_path, media_type="image/png")
+
+    raise HTTPException(status_code=404, detail="二维码图片不存在")
 
 @app.get("/zyfh/reports/{report_file}")
 async def get_report_file(report_file: str):
@@ -780,7 +825,7 @@ def generate_single_qrcode(req: schemas.QRGenerateRequest, db: Session = Depends
     
     base64_str = base64.b64encode(qrcode_bytes).decode()
     qrcode_id = f"QR{datetime.utcnow().strftime('%Y%m%d%H%M%S')}{int(time.time() % 1000)}"
-    qrcode_url = f"http://localhost:8000/zyfh/qrcodes/{qrcode_id}.png"
+    qrcode_url = f"/zyfh/qrcodes/{qrcode_id}.png"
     
     # 6. 保存到数据库
     qrcode = models.QRCodeGenerate(
@@ -923,7 +968,7 @@ def generate_batch_qrcode(payload: Any = Body(...), db: Session = Depends(get_db
             
             base64_str = base64.b64encode(qrcode_bytes).decode()
             qrcode_id = f"QR{datetime.utcnow().strftime('%Y%m%d%H%M%S')}{int(time.time() % 1000)}{idx:03d}"
-            qrcode_url = f"http://localhost:8000/zyfh/qrcodes/{qrcode_id}.png"
+            qrcode_url = f"/zyfh/qrcodes/{qrcode_id}.png"
             
             # 保存到数据库
             qrcode = models.QRCodeGenerate(
