@@ -2701,7 +2701,7 @@ def generate_trace_report(req: schemas.TraceReportGenerateRequest, db: Session =
         "report_id": report_content["report_id"],
         "pres_no": target_pres_no,
         "operation_count": len(records),
-        "download_url": f"http://localhost:8000/zyfh/reports/{report_filename}",
+        "download_url": f"/zyfh/reports/{report_filename}",
         "status": "generated"
     })
 
@@ -2895,7 +2895,7 @@ def generate_stat_report(req: schemas.StatReportGenerateRequest,
         "total_qualified": total_qualified,
         "total_errors": total_errors,
         "qualified_rate": round(qualified_rate, 2),
-        "download_url": f"http://localhost:8000/zyfh/reports/{report_filename}",
+        "download_url": f"/zyfh/reports/{report_filename}",
         "status": "generated"
     })
 
