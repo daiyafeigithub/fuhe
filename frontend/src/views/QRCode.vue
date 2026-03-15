@@ -147,6 +147,7 @@
 
         <div class="result-actions">
           <el-button type="primary" @click="handleDownload">下载二维码</el-button>
+          <el-button @click="handlePrintPreview()">预览打印效果</el-button>
           <el-button type="success" :loading="printing" @click="handlePrint()">打印标签</el-button>
         </div>
 
@@ -268,6 +269,7 @@
       <LabelPrintCard :label="previewLabelData" :qrcode-url="previewRecord?.qrcodeUrl || ''" compact />
       <template #footer>
         <el-button @click="previewDialogVisible = false">关闭</el-button>
+        <el-button @click="handlePrintPreview(previewRecord)">预览打印效果</el-button>
         <el-button type="primary" :loading="printing" @click="handlePrint(previewRecord)">打印标签</el-button>
       </template>
     </el-dialog>
@@ -815,7 +817,7 @@ const toAbsoluteAssetUrl = (url) => {
   return `${window.location.origin}${raw.startsWith('/') ? raw : `/${raw}`}`
 }
 
-const buildBrowserPrintHtml = (items) => {
+const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
   const buildLabelRowHtml = (label, value) => `
     <div class="print-label__row">
       <span class="print-label__label-group">
@@ -895,7 +897,7 @@ const buildBrowserPrintHtml = (items) => {
           min-height: 35mm;
           display: flex;
           flex-direction: column;
-          padding: 2mm 2.2mm 2mm;
+          padding: 1.6mm 1.8mm 1.4mm;
           border: none;
           background: #fff;
           break-inside: avoid;
@@ -906,33 +908,33 @@ const buildBrowserPrintHtml = (items) => {
 
         .print-label__main {
           display: grid;
-          grid-template-columns: minmax(0, 1fr) 14.4mm;
-          gap: 1.5mm;
-          align-items: start;
-          flex: 1 1 auto;
+          grid-template-columns: minmax(0, 1fr) 13mm;
+          gap: 1mm;
+          align-items: stretch;
+          flex: 1 1 0;
           min-height: 0;
         }
 
         .print-label__content {
           display: flex;
           flex-direction: column;
-          gap: 0.55mm;
+          justify-content: space-between;
           padding-top: 0;
         }
 
         .print-label__row {
           display: grid;
-          grid-template-columns: 13.4mm minmax(0, 1fr);
-          gap: 0.6mm;
+          grid-template-columns: 12.6mm minmax(0, 1fr);
+          gap: 0.4mm;
           align-items: baseline;
-          font-size: 6.9pt;
-          line-height: 1.04;
+          font-size: 7pt;
+          line-height: 1.15;
           font-weight: 800;
         }
 
         .print-label__label-group {
           display: grid;
-          grid-template-columns: 11.6mm 1.6mm;
+          grid-template-columns: 10.8mm 1.6mm;
           align-items: baseline;
         }
 
@@ -957,12 +959,11 @@ const buildBrowserPrintHtml = (items) => {
           display: flex;
           align-items: flex-start;
           justify-content: flex-end;
-          min-height: 14.4mm;
           padding-top: 0;
         }
 
         .print-label__qr img {
-          width: 13mm;
+          width: 100%;
           height: auto;
           object-fit: contain;
         }
@@ -971,7 +972,7 @@ const buildBrowserPrintHtml = (items) => {
           display: flex;
           align-items: center;
           justify-content: center;
-          width: 13mm;
+          width: 100%;
           aspect-ratio: 1;
           color: #6f7d89;
           font-size: 6.2pt;
@@ -980,7 +981,20 @@ const buildBrowserPrintHtml = (items) => {
         }
 
         .print-label__stamp {
-          display: none;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 15mm;
+          height: 5.5mm;
+          margin: 1mm auto 0;
+          border: 0.4mm solid #111;
+          border-radius: 50%;
+          font-size: 7.5pt;
+          font-weight: 800;
+          color: #111;
+          background: #fff;
+          flex: 0 0 auto;
+          letter-spacing: 0.02em;
         }
 
         @media print {
@@ -1017,7 +1031,7 @@ const buildBrowserPrintHtml = (items) => {
     </head>
     <body>
       <main class="print-sheet">${cards}</main>
-      <script>
+      ${autoprint ? `<script>
         const images = Array.from(document.images || []);
         document.title = '';
         Promise.all(images.map((img) => {
@@ -1033,7 +1047,7 @@ const buildBrowserPrintHtml = (items) => {
           }, 120);
         });
         window.onafterprint = () => window.close();
-      <\/script>
+      <\/script>` : ''}
     </body>
   </html>`
 }
@@ -1055,7 +1069,7 @@ const showBrowserPrintSettingTip = () => {
   }
 }
 
-const openBrowserPrint = (rows = []) => {
+const openBrowserPrint = (rows = [], { autoprint = true } = {}) => {
   const repeatedRows = rows.flatMap(row => Array.from({ length: printerConfig.copies }, () => row))
   const printableItems = repeatedRows
     .map(row => ({
@@ -1075,9 +1089,18 @@ const openBrowserPrint = (rows = []) => {
     return false
   }
 
-  printWindow.document.write(buildBrowserPrintHtml(printableItems))
+  printWindow.document.write(buildBrowserPrintHtml(printableItems, { autoprint }))
   printWindow.document.close()
   return true
+}
+
+const handlePrintPreview = (row = null) => {
+  const targetRecord = row || generatedRecord.value || buildCurrentGeneratedRecord()
+  if (!targetRecord?.qrcodeUrl && !qrcodeUrl.value) {
+    ElMessage.warning('暂无可预览的标签')
+    return
+  }
+  openBrowserPrint([targetRecord], { autoprint: false })
 }
 
 const handlePrint = async (row = null) => {
