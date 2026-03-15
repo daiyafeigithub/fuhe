@@ -3,7 +3,8 @@ param(
     [string]$RepoUrl = "https://gitee.com/daiyafeigitee/fuhe.git",
     [int]$NginxPort = 80,
     [int]$BackendPort = 8000,
-    [string]$LogFile = ""
+    [string]$LogFile = "",
+    [string]$MedicineCsv = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,6 +59,9 @@ function Ensure-Admin {
         )
         if ($LogFile) {
             $argList += @("-LogFile", "`"$LogFile`"")
+        }
+        if ($MedicineCsv) {
+            $argList += @("-MedicineCsv", "`"$MedicineCsv`"")
         }
         Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs
         exit 0
@@ -554,6 +558,13 @@ if (-not $LogFile) {
     $LogFile = Join-Path $defaultLogRoot "deploy_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 }
 
+if ($MedicineCsv) {
+    try {
+        $MedicineCsv = [System.IO.Path]::GetFullPath($MedicineCsv)
+    } catch {
+    }
+}
+
 Ensure-Admin
 
 if (($InstallRoot -like "D:*") -and (-not (Test-Path -Path "D:\"))) {
@@ -653,6 +664,27 @@ if (-not $skipPip) {
     & $venvPython -m pip install -r $reqFile
     Write-Log "Backend dependencies installed"
     try { Set-Content -Path $reqHashFile -Value $reqHash -Encoding ASCII } catch {}
+}
+
+$importScript = Join-Path $ProjectRoot "backend\tools\import_tcm_medicine_dict.py"
+if ($MedicineCsv) {
+    if (-not (Test-Path -Path $MedicineCsv)) {
+        throw "Medicine CSV not found: $MedicineCsv"
+    }
+    if (-not (Test-Path -Path $importScript)) {
+        throw "CSV import script not found: $importScript"
+    }
+
+    Write-Log "Importing medicine CSV into deployed SQLite..."
+    Write-Log "CSV: $MedicineCsv"
+    Write-Log "DB : $SQLiteDbPath"
+    & $venvPython $importScript --db $SQLiteDbPath --input $MedicineCsv --encoding utf-8-sig
+    if ($LASTEXITCODE -ne 0) {
+        throw "Medicine CSV import failed."
+    }
+    Write-Log "Medicine CSV import completed"
+} else {
+    Write-Log "No medicine CSV provided. Skip dictionary import."
 }
 
 Write-Step "Build frontend"
