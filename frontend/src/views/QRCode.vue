@@ -854,7 +854,7 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
       <title></title>
       <style>
         @page {
-          size: A4 portrait;
+          size: 50mm 35mm;
           margin: 0 !important;
         }
 
@@ -872,21 +872,22 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
 
         body {
           font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif;
-          background: #f2f4f8;
+          background: #eceff3;
           color: #111;
           -webkit-print-color-adjust: exact;
           print-color-adjust: exact;
+          display: flex;
+          align-items: flex-start;
+          justify-content: center;
+          padding: 14px;
         }
 
         .print-sheet {
-          width: 210mm;
-          min-height: 297mm;
-          margin: 0 auto;
-          padding: 1.5mm 2mm;
-          display: flex;
-          flex-wrap: wrap;
-          align-content: flex-start;
-          gap: 2mm;
+          width: 50mm;
+          min-height: 35mm;
+          margin: 0;
+          padding: 0;
+          display: block;
           background: #fff;
           box-shadow: 0 8px 22px rgba(31, 47, 66, 0.16);
         }
@@ -897,7 +898,7 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
           min-height: 35mm;
           display: flex;
           flex-direction: column;
-          padding: 1.6mm 1.8mm 1.4mm;
+          padding: 1.4mm 1.8mm 1.2mm;
           border: none;
           background: #fff;
           break-inside: avoid;
@@ -906,12 +907,16 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
           overflow: hidden;
         }
 
+        .print-label + .print-label {
+          margin-top: 8px;
+        }
+
         .print-label__main {
           display: grid;
-          grid-template-columns: minmax(0, 1fr) 13mm;
+          grid-template-columns: minmax(0, 1fr) 13.2mm;
           gap: 1mm;
           align-items: stretch;
-          flex: 1 1 0;
+          flex: 1 1 auto;
           min-height: 0;
         }
 
@@ -924,17 +929,17 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
 
         .print-label__row {
           display: grid;
-          grid-template-columns: 12.6mm minmax(0, 1fr);
+          grid-template-columns: 12.8mm minmax(0, 1fr);
           gap: 0.4mm;
           align-items: baseline;
-          font-size: 7pt;
-          line-height: 1.15;
+          font-size: 7.2pt;
+          line-height: 1.13;
           font-weight: 800;
         }
 
         .print-label__label-group {
           display: grid;
-          grid-template-columns: 10.8mm 1.6mm;
+          grid-template-columns: 11mm 1.6mm;
           align-items: baseline;
         }
 
@@ -965,6 +970,7 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
         .print-label__qr img {
           width: 100%;
           height: auto;
+          aspect-ratio: 1;
           object-fit: contain;
         }
 
@@ -984,12 +990,12 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
           display: flex;
           align-items: center;
           justify-content: center;
-          width: 15mm;
-          height: 5.5mm;
-          margin: 1mm auto 0;
+          width: 16.2mm;
+          height: 5.8mm;
+          margin: 0.9mm auto 0;
           border: 0.4mm solid #111;
           border-radius: 50%;
-          font-size: 7.5pt;
+          font-size: 7.6pt;
           font-weight: 800;
           color: #111;
           background: #fff;
@@ -1000,20 +1006,21 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
         @media print {
           html,
           body {
-            width: auto;
-            height: auto;
+            width: 50mm;
+            height: 35mm;
             margin: 0 !important;
             padding: 0 !important;
-            overflow: visible;
+            overflow: hidden;
             background: #fff !important;
+            display: block;
           }
 
           .print-sheet {
-            width: 210mm;
-            min-height: 297mm;
-            padding: 1.5mm 2mm;
+            width: 50mm;
+            min-height: 35mm;
+            height: 35mm;
+            padding: 0;
             margin: 0;
-            gap: 2mm;
             box-shadow: none;
           }
 
@@ -1022,9 +1029,18 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
             height: 35mm;
             min-height: 35mm;
             box-shadow: none;
+            break-after: page;
+            page-break-after: always;
+            margin: 0;
+          }
+
+          .print-label + .print-label {
+            margin-top: 0;
+          }
+
+          .print-label:last-child {
             break-after: auto;
             page-break-after: auto;
-            margin: 0;
           }
         }
       </style>
@@ -1065,7 +1081,7 @@ const showBrowserPrintSettingTip = () => {
   }
 
   if (shouldShow) {
-    ElMessage.info('浏览器打印请在“更多设置”里关闭页眉和页脚，边距选“无”，纸张选 A4，缩放选“实际大小/100%”，标签规格使用 50mm x 35mm。')
+    ElMessage.info('浏览器打印请在“更多设置”里关闭页眉和页脚，边距选“无”，纸张选 50mm x 35mm（自定义纸张），缩放选“实际大小/100%”。')
   }
 }
 
