@@ -854,7 +854,7 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
       <title></title>
       <style>
         @page {
-          size: 50mm 35mm;
+          size: 101mm 35mm;
           margin: 0 !important;
         }
 
@@ -883,11 +883,17 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
         }
 
         .print-sheet {
-          width: 50mm;
+          width: 101mm;
           min-height: 35mm;
           margin: 0;
           padding: 0;
-          display: block;
+          display: grid;
+          grid-template-columns: repeat(2, 50mm);
+          grid-auto-rows: 35mm;
+          column-gap: 1mm;
+          row-gap: 0;
+          align-items: stretch;
+          justify-content: start;
           background: #fff;
           box-shadow: 0 8px 22px rgba(31, 47, 66, 0.16);
         }
@@ -905,10 +911,6 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
           page-break-inside: avoid;
           box-shadow: none;
           overflow: hidden;
-        }
-
-        .print-label + .print-label {
-          margin-top: 8px;
         }
 
         .print-label__main {
@@ -1006,7 +1008,7 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
         @media print {
           html,
           body {
-            width: 50mm;
+            width: 101mm;
             height: 35mm;
             margin: 0 !important;
             padding: 0 !important;
@@ -1016,12 +1018,16 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
           }
 
           .print-sheet {
-            width: 50mm;
+            width: 101mm;
             min-height: 35mm;
-            height: 35mm;
+            height: auto;
             padding: 0;
             margin: 0;
             box-shadow: none;
+            grid-template-columns: repeat(2, 50mm);
+            grid-auto-rows: 35mm;
+            column-gap: 1mm;
+            row-gap: 0;
           }
 
           .print-label {
@@ -1029,18 +1035,9 @@ const buildBrowserPrintHtml = (items, { autoprint = true } = {}) => {
             height: 35mm;
             min-height: 35mm;
             box-shadow: none;
-            break-after: page;
-            page-break-after: always;
-            margin: 0;
-          }
-
-          .print-label + .print-label {
-            margin-top: 0;
-          }
-
-          .print-label:last-child {
             break-after: auto;
             page-break-after: auto;
+            margin: 0;
           }
         }
       </style>
@@ -1081,7 +1078,7 @@ const showBrowserPrintSettingTip = () => {
   }
 
   if (shouldShow) {
-    ElMessage.info('浏览器打印请在“更多设置”里关闭页眉和页脚，边距选“无”，纸张选 50mm x 35mm（自定义纸张），缩放选“实际大小/100%”。')
+    ElMessage.info('浏览器打印请在“更多设置”里关闭页眉和页脚，边距选“无”，缩放选“实际大小/100%”。双联标签纸请设为 101mm x 35mm，并选择纵向（左右并排两张 50mm x 35mm）。')
   }
 }
 
