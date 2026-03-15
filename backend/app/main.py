@@ -54,7 +54,10 @@ def ensure_schema_compatibility():
                 "handle_by": "VARCHAR(20)"
             },
             "qrcode_generate_record": {
-                "trace_url": "VARCHAR(500)"
+                "trace_url": "VARCHAR(500)",
+                "drug_origin": "VARCHAR(100)",
+                "production_date": "VARCHAR(20)",
+                "expiry_date": "VARCHAR(20)"
             }
         }
 
@@ -68,9 +71,9 @@ def ensure_schema_compatibility():
                     if column_name in existing_columns:
                         continue
                     conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"))
-                    print(f"✅ 自动补齐字段: {table_name}.{column_name}")
+                    print(f"自动补齐字段: {table_name}.{column_name}")
     except Exception as exc:
-        print(f"⚠️ 数据库兼容检查失败: {str(exc)[:200]}")
+        print(f"数据库兼容检查失败: {str(exc)[:200]}")
 
 
 ensure_schema_compatibility()
@@ -534,13 +537,13 @@ def init_default_data():
 
         ensure_demo_business_data(db)
         db.commit()
-        print("✅ 默认数据初始化成功")
+        print("默认数据初始化成功")
         print("   默认管理员账号: admin / admin123")
         if force_reset_admin_password:
             print("   已按环境变量 RESET_ADMIN_PASSWORD=true 重置管理员密码")
     except Exception as e:
         db.rollback()
-        print(f"⚠️ 初始化数据失败: {str(e)[:200]}")
+        print(f"初始化数据失败: {str(e)[:200]}")
     finally:
         db.close()
 
@@ -672,7 +675,7 @@ def prune_qrcode_image_files(db: Session, keep_count: int = QRCODE_IMAGE_KEEP_CO
             except Exception:
                 continue
     except Exception as exc:
-        print(f"⚠️ 清理二维码图片失败: {str(exc)[:120]}")
+        print(f"清理二维码图片失败: {str(exc)[:120]}")
 
 
 def sanitize_print_text(value: Optional[str], fallback: str = "QR-CODE") -> str:
@@ -681,46 +684,239 @@ def sanitize_print_text(value: Optional[str], fallback: str = "QR-CODE") -> str:
     return raw or fallback
 
 
-def build_zpl_print_command(qrcode_content: str, label_text: str, copies: int) -> str:
-    """构建 ZPL 打印指令。"""
+def truncate_print_text(value: Optional[str], limit: int = 18) -> str:
+    """限制打印文本长度，避免超出标签区域。"""
+    safe = sanitize_print_text(value, fallback="--")
+    if len(safe) <= limit:
+        return safe
+    if limit <= 3:
+        return safe[:limit]
+    return safe[:limit - 3] + "..."
+
+
+def normalize_label_date_input(value: Optional[str], field_name: str) -> str:
+    """标准化标签日期输入。"""
+    dt = parse_datetime_value(value)
+    if not dt:
+        raise ValueError(f"{field_name}格式错误，应为YYYY-MM-DD")
+    return dt.strftime("%Y-%m-%d")
+
+
+def normalize_qrcode_label_fields(drug_origin: Optional[str], production_date: Optional[str], expiry_date: Optional[str]) -> Tuple[str, str, str]:
+    """校验并规范二维码标签附加信息。"""
+    normalized_origin = sanitize_print_text(drug_origin, fallback="")
+    if not normalized_origin:
+        raise ValueError("药材产地不能为空")
+
+    normalized_production_date = normalize_label_date_input(production_date, "生产日期")
+    normalized_expiry_date = normalize_label_date_input(expiry_date, "保质期至")
+
+    production_dt = parse_datetime_value(normalized_production_date)
+    expiry_dt = parse_datetime_value(normalized_expiry_date)
+    if production_dt and expiry_dt and expiry_dt < production_dt:
+        raise ValueError("保质期至不能早于生产日期")
+
+    return normalized_origin, normalized_production_date, normalized_expiry_date
+
+
+def format_label_date_display(value: Optional[str]) -> str:
+    """格式化标签日期展示。"""
+    dt = parse_datetime_value(value)
+    if dt:
+        return dt.strftime("%Y.%m.%d")
+    return sanitize_print_text(value, fallback="--")
+
+
+def format_label_month_display(value: Optional[str]) -> str:
+    """格式化标签年月展示。"""
+    if value:
+        raw = value.strip()
+        dotted_match = re.fullmatch(r"(\d{4})\.(\d{2})\.(\d{2})", raw)
+        if dotted_match:
+            return f"{dotted_match.group(1)}年{int(dotted_match.group(2))}月"
+        month_match = re.fullmatch(r"(\d{4})[-/.](\d{1,2})", raw)
+        if month_match:
+            return f"{month_match.group(1)}年{int(month_match.group(2))}月"
+        if re.fullmatch(r"\d{4}年\d{1,2}月", raw):
+            return raw
+    dt = parse_datetime_value(value)
+    if dt:
+        return f"{dt.year}年{dt.month}月"
+    return sanitize_print_text(value, fallback="--")
+
+
+def load_medicine_label_info(db: Session, cj_id: Optional[str]) -> Tuple[str, str]:
+    """根据院内编码获取品名和包装单位。"""
+    if not cj_id:
+        return "", "袋"
+
+    try:
+        cjid_value = int(str(cj_id).strip())
+    except Exception:
+        return "", "袋"
+
+    medicine = db.query(models.TCMMedicineDict).filter(
+        models.TCMMedicineDict.cjid == cjid_value,
+        models.TCMMedicineDict.status == 1
+    ).first()
+    if not medicine:
+        return "", "袋"
+
+    return (
+        sanitize_print_text(medicine.medicine_name, fallback=""),
+        sanitize_print_text(medicine.unit, fallback="袋")
+    )
+
+
+def build_label_amount(spec: Optional[str], num: Optional[int], unit: Optional[str]) -> str:
+    """生成标签装量文本。"""
+    safe_spec = sanitize_print_text(spec, fallback="--")
+    safe_unit = sanitize_print_text(unit, fallback="袋")
+
+    try:
+        safe_num = max(int(num or 0), 0)
+    except Exception:
+        safe_num = 0
+
+    if safe_num <= 0:
+        return safe_spec
+    return f"{safe_spec}*{safe_num}{safe_unit}"
+
+
+def build_qrcode_label_payload(db: Session, record: Optional[models.QRCodeGenerate], custom_text: Optional[str] = None) -> Dict[str, str]:
+    """构建标签打印/预览所需字段。"""
+    custom_name = sanitize_print_text(custom_text, fallback="")
+
+    if not record:
+        return {
+            "drug_name": custom_name or "QR-CODE",
+            "drug_origin": "--",
+            "amount": "--",
+            "batch_no": "--",
+            "production_date": "--",
+            "expiry_date": "--",
+            "unit": "袋",
+            "stamp_text": "质量合格"
+        }
+
+    medicine_name, unit = load_medicine_label_info(db, record.cj_id)
+    drug_name = custom_name or medicine_name or f"CJID:{record.cj_id}"
+
+    return {
+        "drug_name": drug_name,
+        "drug_origin": sanitize_print_text(record.drug_origin, fallback="--"),
+        "amount": build_label_amount(record.spec, record.num, unit),
+        "batch_no": sanitize_print_text(record.batch_no, fallback="--"),
+        "production_date": format_label_date_display(record.production_date),
+        "expiry_date": format_label_month_display(record.expiry_date),
+        "unit": unit,
+        "stamp_text": "质量合格"
+    }
+
+
+def serialize_qrcode_record(db: Session, record: models.QRCodeGenerate) -> Dict[str, Any]:
+    """序列化二维码生成记录，附带标签展示字段。"""
+    label_payload = build_qrcode_label_payload(db, record)
+    return {
+        "type": "generate",
+        "qrcode_id": record.qrcode_id,
+        "enterprise_code": record.enterprise_code,
+        "cj_id": record.cj_id,
+        "spec": record.spec,
+        "batch_no": record.batch_no,
+        "num": record.num,
+        "weight": float(record.weight) if record.weight is not None else None,
+        "generate_by": record.generate_by,
+        "generate_time": record.generate_time.isoformat() if record.generate_time else None,
+        "qrcode_url": record.qrcode_url,
+        "qrcode_origin": record.qrcode_origin,
+        "base64_str": record.base64_str,
+        "trace_url": record.trace_url,
+        "qrcode_content": build_merged_qrcode_content(record.trace_url or "", record.base64_str),
+        "drug_name": label_payload["drug_name"],
+        "drug_origin": record.drug_origin,
+        "label_amount": label_payload["amount"],
+        "unit": label_payload["unit"],
+        "production_date": record.production_date,
+        "production_date_display": label_payload["production_date"],
+        "expiry_date": record.expiry_date,
+        "expiry_date_display": label_payload["expiry_date"],
+        "stamp_text": label_payload["stamp_text"]
+    }
+
+
+def build_label_print_lines(label_payload: Dict[str, str]) -> List[str]:
+    """将标签字段转换为打印行文本。"""
+    return [
+        f"品名：{truncate_print_text(label_payload.get('drug_name'), 18)}",
+        f"药材产地：{truncate_print_text(label_payload.get('drug_origin'), 16)}",
+        f"装量：{truncate_print_text(label_payload.get('amount'), 18)}",
+        f"产品批号：{truncate_print_text(label_payload.get('batch_no'), 18)}",
+        f"生产日期：{truncate_print_text(label_payload.get('production_date'), 18)}",
+        f"保质期至：{truncate_print_text(label_payload.get('expiry_date'), 18)}"
+    ]
+
+
+def build_zpl_print_command(qrcode_content: str, label_payload: Dict[str, str], copies: int) -> str:
+    """构建 ZPL 标签打印指令。"""
     safe_qr = (qrcode_content or "").replace("^", " ")
-    safe_label = sanitize_print_text(label_text).replace("^", " ")
+    line_commands = []
+    top = 16
+
+    for index, line in enumerate(build_label_print_lines(label_payload)):
+        safe_line = sanitize_print_text(line, fallback="--").replace("^", " ")
+        y = top + index * 26
+        line_commands.append(f"^FO12,{y}^A0N,18,18^FB310,1,0,L,0^FD{safe_line}^FS")
+
+    stamp_text = sanitize_print_text(label_payload.get("stamp_text"), fallback="质量合格").replace("^", " ")
     return (
         "^XA\n"
         "^CI28\n"
-        "^PW720\n"
-        "^LL900\n"
-        f"^FO80,80^BQN,2,8^FDLA,{safe_qr}^FS\n"
-        f"^FO80,560^A0N,32,32^FD{safe_label}^FS\n"
-        f"^PQ{copies},0,1,N\n"
-        "^XZ\n"
+        "^PW500\n"
+        "^LL350\n"
+        + "\n".join(line_commands) + "\n"
+        + f"^FO338,14^BQN,2,3^FDLA,{safe_qr}^FS\n"
+        + "^FO176,270^GE114,58,2,B^FS\n"
+        + f"^FO200,288^A0N,20,20^FD{stamp_text}^FS\n"
+        + f"^PQ{copies},0,1,N\n"
+        + "^XZ\n"
     )
 
 
-def build_tspl_print_command(qrcode_content: str, label_text: str, copies: int) -> str:
-    """构建 TSPL 打印指令。"""
+def build_tspl_print_command(qrcode_content: str, label_payload: Dict[str, str], copies: int) -> str:
+    """构建 TSPL 标签打印指令。"""
     safe_qr = (qrcode_content or "").replace('"', '""')
-    safe_label = sanitize_print_text(label_text).replace('"', '""')
+    line_commands = []
+    top = 14
+
+    for index, line in enumerate(build_label_print_lines(label_payload)):
+        safe_line = sanitize_print_text(line, fallback="--").replace('"', '""')
+        y = top + index * 24
+        line_commands.append(f'TEXT 12,{y},"TSS24.BF2",0,1,1,"{safe_line}"')
+
+    stamp_text = sanitize_print_text(label_payload.get("stamp_text"), fallback="质量合格").replace('"', '""')
     return (
-        "SIZE 80 mm,60 mm\n"
+        "SIZE 50 mm,35 mm\n"
         "GAP 2 mm,0 mm\n"
         "DIRECTION 1\n"
         "CLS\n"
-        f"QRCODE 40,40,L,8,A,0,M2,S7,\"{safe_qr}\"\n"
-        f"TEXT 40,360,\"TSS24.BF2\",0,1,1,\"{safe_label}\"\n"
-        f"PRINT {copies},1\n"
+        + "\n".join(line_commands) + "\n"
+        + f'QRCODE 318,14,L,3,A,0,M2,S7,"{safe_qr}"\n'
+        + "ELLIPSE 170,270,112,56,2\n"
+        + f'TEXT 194,286,"TSS24.BF2",0,1,1,"{stamp_text}"\n'
+        + f"PRINT {copies},1\n"
     )
 
 
-def build_qrcode_print_command(protocol: str, qrcode_content: str, label_text: str, copies: int) -> Tuple[str, str]:
+def build_qrcode_print_command(protocol: str, qrcode_content: str, label_payload: Dict[str, str], copies: int) -> Tuple[str, str]:
     """构建不同协议的二维码打印命令。"""
     normalized_protocol = (protocol or "zpl").strip().lower()
     normalized_copies = max(1, min(int(copies), 20))
 
     if normalized_protocol in ["zpl", "inkjet", "inkjet_zpl"]:
-        return build_zpl_print_command(qrcode_content, label_text, normalized_copies), "zpl"
+        return build_zpl_print_command(qrcode_content, label_payload, normalized_copies), "zpl"
     if normalized_protocol in ["tspl", "inkjet_tspl"]:
-        return build_tspl_print_command(qrcode_content, label_text, normalized_copies), "tspl"
+        return build_tspl_print_command(qrcode_content, label_payload, normalized_copies), "tspl"
     if normalized_protocol in ["raw", "url"]:
         return f"{qrcode_content}\n", "raw"
 
@@ -731,31 +927,6 @@ def send_print_command(host: str, port: int, command: str, timeout: float):
     """通过 TCP 下发打印指令（常见 9100 端口）。"""
     with socket.create_connection((host, port), timeout=timeout) as sock:
         sock.sendall(command.encode("utf-8", errors="ignore"))
-
-
-def build_qrcode_label_text(db: Session, record: Optional[models.QRCodeGenerate], custom_text: Optional[str]) -> str:
-    """构建打印文本，默认展示品名+规格（不可用时回退编码+规格）。"""
-    custom = sanitize_print_text(custom_text, fallback="")
-    if custom:
-        return custom
-
-    if not record:
-        return "QR-CODE"
-
-    medicine_name = ""
-    try:
-        cjid_value = int(str(record.cj_id).strip())
-        medicine = db.query(models.TCMMedicineDict).filter(
-            models.TCMMedicineDict.cjid == cjid_value,
-            models.TCMMedicineDict.status == 1
-        ).first()
-        medicine_name = medicine.medicine_name if medicine else ""
-    except Exception:
-        medicine_name = ""
-
-    if medicine_name:
-        return sanitize_print_text(f"{medicine_name} {record.spec or ''}")
-    return sanitize_print_text(f"CJID:{record.cj_id} {record.spec or ''}")
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -1194,6 +1365,15 @@ def generate_single_qrcode(req: schemas.QRGenerateRequest, db: Session = Depends
         return error_response("1000", "追溯网址不能为空")
     if not (trace_url.startswith("http://") or trace_url.startswith("https://")):
         return error_response("1000", "追溯网址格式错误，应以 http:// 或 https:// 开头")
+
+    try:
+        drug_origin, production_date, expiry_date = normalize_qrcode_label_fields(
+            req.drug_origin,
+            req.production_date,
+            req.expiry_date
+        )
+    except ValueError as exc:
+        return error_response("1000", str(exc))
     
     # 3. 数据校验（根据 guide.md 要求）
     # 规格：必须为"数字+g"格式，数字1-30（含）
@@ -1236,6 +1416,9 @@ def generate_single_qrcode(req: schemas.QRGenerateRequest, db: Session = Depends
         batch_no=req.batch_no,
         num=req.num,
         weight=auto_weight,
+        drug_origin=drug_origin,
+        production_date=production_date,
+        expiry_date=expiry_date,
         qrcode_origin=qrcode_origin,
         base64_str=base64_str,
         trace_url=trace_url,
@@ -1264,15 +1447,14 @@ def generate_single_qrcode(req: schemas.QRGenerateRequest, db: Session = Depends
 
     prune_qrcode_image_files(db, QRCODE_IMAGE_KEEP_COUNT, force_keep=[qrcode_id])
 
-    return success_response({
-        "qrcode_id": qrcode_id,
-        "qrcode_content": merged_qrcode_content,
-        "qrcode_origin": qrcode_origin,
-        "base64_str": base64_str,
-        "qrcode_url": qrcode_url,
-        "trace_url": trace_url,
-        "weight": auto_weight
-    })
+    response_data = serialize_qrcode_record(db, qrcode)
+    response_data["qrcode_content"] = merged_qrcode_content
+    response_data["qrcode_origin"] = qrcode_origin
+    response_data["base64_str"] = base64_str
+    response_data["qrcode_url"] = qrcode_url
+    response_data["trace_url"] = trace_url
+    response_data["weight"] = auto_weight
+    return success_response(response_data)
 
 @app.post("/zyfh/api/v1/qrcode/generate/batch")
 def generate_batch_qrcode(payload: Any = Body(...), db: Session = Depends(get_db), current_user=Depends(get_current_user)):
@@ -1392,6 +1574,21 @@ def generate_batch_qrcode(payload: Any = Body(...), db: Session = Depends(get_db
                 continue
 
             try:
+                drug_origin, production_date, expiry_date = normalize_qrcode_label_fields(
+                    qr_req.drug_origin,
+                    qr_req.production_date,
+                    qr_req.expiry_date
+                )
+            except ValueError as exc:
+                fail_list.append({
+                    "index": idx,
+                    "params": qr_req_dict,
+                    "reason": str(exc)
+                })
+                fail_count += 1
+                continue
+
+            try:
                 auto_weight = compute_weight_by_spec(qr_req.spec, qr_req.num)
             except Exception as exc:
                 fail_list.append({
@@ -1419,6 +1616,9 @@ def generate_batch_qrcode(payload: Any = Body(...), db: Session = Depends(get_db
                 batch_no=qr_req.batch_no,
                 num=qr_req.num,
                 weight=auto_weight,
+                drug_origin=drug_origin,
+                production_date=production_date,
+                expiry_date=expiry_date,
                 qrcode_origin=qrcode_origin,
                 base64_str=base64_str,
                 trace_url=trace_url,
@@ -1505,7 +1705,7 @@ def print_qrcode(payload: dict = Body(...), db: Session = Depends(get_db), curre
     if not qrcode_content:
         return error_response("1000", "缺少二维码内容，需提供 qrcode_id 或 qrcode_content")
 
-    label = build_qrcode_label_text(db, qrcode_record, label_text)
+    label = build_qrcode_label_payload(db, qrcode_record, label_text)
 
     try:
         command, normalized_protocol = build_qrcode_print_command(protocol, qrcode_content, label, copies)
@@ -1534,7 +1734,8 @@ def print_qrcode(payload: dict = Body(...), db: Session = Depends(get_db), curre
         "copies": copies,
         "sent": sent,
         "message": message,
-        "command": command
+        "command": command,
+        "label": label
     }, "打印任务已发送" if sent else "打印指令已生成")
 
 
@@ -1680,21 +1881,7 @@ def query_qrcode_records(enterprise_code: int = None, cj_id: str = None,
     # 合并结果
     records = []
     for rec in generate_records:
-        records.append({
-            "type": "generate",
-            "qrcode_id": rec.qrcode_id,
-            "enterprise_code": rec.enterprise_code,
-            "cj_id": rec.cj_id,
-            "spec": rec.spec,
-            "batch_no": rec.batch_no,
-            "generate_by": rec.generate_by,
-            "generate_time": rec.generate_time.isoformat() if rec.generate_time else None,
-            "qrcode_url": rec.qrcode_url,
-            "qrcode_origin": rec.qrcode_origin,
-            "base64_str": rec.base64_str,
-            "trace_url": rec.trace_url,
-            "qrcode_content": build_merged_qrcode_content(rec.trace_url or "", rec.base64_str)
-        })
+        records.append(serialize_qrcode_record(db, rec))
     
     for rec in verify_records:
         records.append({

@@ -62,8 +62,8 @@ else:
             pass
     except Exception as e:
         # MySQL 连接失败，回退到 SQLite
-        print(f"⚠️ MySQL 连接失败: {str(e)[:100]}")
-        print("💡 已自动切换到 SQLite 模式")
+        print(f"MySQL 连接失败: {str(e)[:100]}")
+        print("已自动切换到 SQLite 模式")
         DATABASE_URL = _build_sqlite_url()
         engine = create_engine(
             DATABASE_URL,

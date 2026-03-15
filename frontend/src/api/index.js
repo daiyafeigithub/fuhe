@@ -82,6 +82,9 @@ export const generateQRCode = (data) => api.post('/qrcode/generate/single', {
   cj_id: data.cjId,
   spec: data.spec,
   batch_no: data.batchNo,
+  drug_origin: data.drugOrigin,
+  production_date: data.productionDate,
+  expiry_date: data.expiryDate,
   num: data.num,
   weight: data.weight,
   trace_url: data.traceUrl

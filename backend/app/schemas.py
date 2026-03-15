@@ -20,6 +20,9 @@ class QRGenerateRequest(BaseModel):
     batch_no: str
     num: int = 7
     weight: float
+    drug_origin: str
+    production_date: str
+    expiry_date: str
     trace_url: Optional[str] = None
 
 class QRGenerateResponse(BaseModel):
@@ -27,6 +30,9 @@ class QRGenerateResponse(BaseModel):
     qrcode_content: str
     base64_str: str
     qrcode_url: str
+    drug_origin: Optional[str] = None
+    production_date: Optional[str] = None
+    expiry_date: Optional[str] = None
     trace_url: Optional[str] = None
 
 class QRParseResponse(BaseModel):

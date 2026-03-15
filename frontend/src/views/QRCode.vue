@@ -7,6 +7,7 @@
           <el-button type="primary" size="small" @click="handleBatchGenerate">批量生成</el-button>
         </div>
       </template>
+
       <el-form ref="formRef" :model="form" :rules="rules" label-width="100px" class="generator-form">
         <el-row :gutter="20" class="form-row">
           <el-col :xs="24" :sm="24" :md="12" :lg="12">
@@ -48,6 +49,7 @@
             </el-form-item>
           </el-col>
         </el-row>
+
         <el-row :gutter="20" class="form-row">
           <el-col :xs="24" :sm="24" :md="12" :lg="12">
             <el-form-item label="院内编码">
@@ -56,12 +58,13 @@
           </el-col>
           <el-col :xs="24" :sm="24" :md="12" :lg="12">
             <el-form-item label="规格" prop="spec">
-              <el-input v-model="form.spec" placeholder="如：5g">
+              <el-input v-model="form.spec" placeholder="如：5">
                 <template #append>g</template>
               </el-input>
             </el-form-item>
           </el-col>
         </el-row>
+
         <el-row :gutter="20" class="form-row">
           <el-col :xs="24" :sm="24" :md="12" :lg="12">
             <el-form-item label="批号" prop="batchNo">
@@ -69,11 +72,39 @@
             </el-form-item>
           </el-col>
           <el-col :xs="24" :sm="24" :md="12" :lg="12">
-            <el-form-item label="追溯网址" prop="traceUrl">
-              <el-input v-model="form.traceUrl" placeholder="如：https://trace.example.com/xxx" />
+            <el-form-item label="药材产地" prop="drugOrigin">
+              <el-input v-model="form.drugOrigin" placeholder="如：湖北麻城" />
             </el-form-item>
           </el-col>
         </el-row>
+
+        <el-row :gutter="20" class="form-row">
+          <el-col :xs="24" :sm="24" :md="12" :lg="12">
+            <el-form-item label="生产日期" prop="productionDate">
+              <el-date-picker
+                v-model="form.productionDate"
+                type="date"
+                value-format="YYYY-MM-DD"
+                format="YYYY.MM.DD"
+                placeholder="请选择生产日期"
+                style="width: 100%"
+              />
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :sm="24" :md="12" :lg="12">
+            <el-form-item label="保质期至" prop="expiryDate">
+              <el-date-picker
+                v-model="form.expiryDate"
+                type="date"
+                value-format="YYYY-MM-DD"
+                format="YYYY.MM.DD"
+                placeholder="请选择保质期至"
+                style="width: 100%"
+              />
+            </el-form-item>
+          </el-col>
+        </el-row>
+
         <el-row :gutter="20" class="form-row">
           <el-col :xs="24" :sm="24" :md="12" :lg="12">
             <el-form-item label="数量" prop="num">
@@ -86,6 +117,15 @@
             </el-form-item>
           </el-col>
         </el-row>
+
+        <el-row :gutter="20" class="form-row">
+          <el-col :span="24">
+            <el-form-item label="追溯网址" prop="traceUrl">
+              <el-input v-model="form.traceUrl" placeholder="如：https://trace.example.com/xxx" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+
         <el-form-item>
           <el-button type="primary" :loading="generating" @click="handleGenerate">生成二维码</el-button>
           <el-button @click="handleReset">重置</el-button>
@@ -95,15 +135,26 @@
       <el-divider />
 
       <div v-if="qrcodeUrl" class="qrcode-result">
-        <h4>生成结果</h4>
-        <div class="qrcode-preview">
-          <img :src="qrcodeUrl" alt="二维码" />
+        <div class="result-head">
+          <h4>标签预览</h4>
+          <el-tag :type="printerConfig.enablePrinter ? 'warning' : 'success'" effect="plain">
+            {{ printerModeText }}
+          </el-tag>
         </div>
-        <p><strong>追溯网址：</strong>{{ traceUrl }}</p>
-        <p><strong>原始内容：</strong>{{ qrcodeContent }}</p>
-        <p><strong>Base64编码：</strong>{{ base64Str }}</p>
-        <el-button type="primary" @click="handleDownload">下载二维码</el-button>
-        <el-button type="success" :loading="printing" @click="handlePrint()">打印二维码</el-button>
+        <p class="result-tip">{{ printerHintText }}</p>
+
+        <LabelPrintCard :label="generatedLabelData" :qrcode-url="qrcodeUrl" />
+
+        <div class="result-actions">
+          <el-button type="primary" @click="handleDownload">下载二维码</el-button>
+          <el-button type="success" :loading="printing" @click="handlePrint()">打印标签</el-button>
+        </div>
+
+        <div class="result-meta">
+          <p><strong>追溯网址：</strong>{{ traceUrl }}</p>
+          <p><strong>原始内容：</strong>{{ qrcodeContent }}</p>
+          <p><strong>Base64编码：</strong>{{ base64Str }}</p>
+        </div>
       </div>
     </el-card>
 
@@ -111,44 +162,62 @@
       <template #header>
         <span>喷码枪打印配置</span>
       </template>
+
       <el-form :model="printerConfig" label-width="110px" class="printer-form">
         <el-row :gutter="20">
           <el-col :xs="24" :sm="24" :md="12" :lg="12">
-            <el-form-item label="打印机IP">
-              <el-input v-model="printerConfig.printerHost" placeholder="如：192.168.1.100（可留空仅生成指令）" />
+            <el-form-item label="启用喷码枪">
+              <el-switch v-model="printerConfig.enablePrinter" inline-prompt active-text="开" inactive-text="关" />
             </el-form-item>
           </el-col>
-          <el-col :xs="24" :sm="24" :md="12" :lg="12">
-            <el-form-item label="端口">
-              <el-input-number v-model="printerConfig.printerPort" :min="1" :max="65535" :step="1" style="width: 100%" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="20">
-          <el-col :xs="24" :sm="24" :md="12" :lg="12">
-            <el-form-item label="协议">
-              <el-select v-model="printerConfig.printerProtocol" style="width: 100%">
-                <el-option label="ZPL" value="zpl" />
-                <el-option label="TSPL" value="tspl" />
-                <el-option label="RAW" value="raw" />
-              </el-select>
-            </el-form-item>
-          </el-col>
-          <el-col :xs="24" :sm="24" :md="12" :lg="12">
-            <el-form-item label="超时(秒)">
-              <el-input-number v-model="printerConfig.printerTimeout" :min="1" :max="30" :step="1" style="width: 100%" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <el-row :gutter="20">
           <el-col :xs="24" :sm="24" :md="12" :lg="12">
             <el-form-item label="打印份数">
               <el-input-number v-model="printerConfig.copies" :min="1" :max="20" :step="1" style="width: 100%" />
             </el-form-item>
           </el-col>
         </el-row>
+
+        <el-alert
+          class="printer-mode-alert"
+          :title="printerConfig.enablePrinter ? '已启用喷码枪直连打印' : '已切换为浏览器打印标签，无需配置喷码枪参数'"
+          :type="printerConfig.enablePrinter ? 'success' : 'info'"
+          :closable="false"
+        />
+
+        <template v-if="printerConfig.enablePrinter">
+          <el-row :gutter="20">
+            <el-col :xs="24" :sm="24" :md="12" :lg="12">
+              <el-form-item label="打印机IP">
+                <el-input v-model="printerConfig.printerHost" placeholder="如：192.168.1.100（可留空仅生成指令）" />
+              </el-form-item>
+            </el-col>
+            <el-col :xs="24" :sm="24" :md="12" :lg="12">
+              <el-form-item label="端口">
+                <el-input-number v-model="printerConfig.printerPort" :min="1" :max="65535" :step="1" style="width: 100%" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+
+          <el-row :gutter="20">
+            <el-col :xs="24" :sm="24" :md="12" :lg="12">
+              <el-form-item label="协议">
+                <el-select v-model="printerConfig.printerProtocol" style="width: 100%">
+                  <el-option label="ZPL" value="zpl" />
+                  <el-option label="TSPL" value="tspl" />
+                  <el-option label="RAW" value="raw" />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :xs="24" :sm="24" :md="12" :lg="12">
+              <el-form-item label="超时(秒)">
+                <el-input-number v-model="printerConfig.printerTimeout" :min="1" :max="30" :step="1" style="width: 100%" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+        </template>
+
         <el-form-item class="printer-actions">
-          <el-button :loading="connectionTesting" @click="handleTestConnection">连接测试</el-button>
+          <el-button v-if="printerConfig.enablePrinter" :loading="connectionTesting" @click="handleTestConnection">连接测试</el-button>
           <el-button type="primary" plain @click="savePrinterConfig()">保存配置</el-button>
           <el-button @click="resetPrinterConfig">恢复默认</el-button>
         </el-form-item>
@@ -175,21 +244,33 @@
           </div>
         </div>
       </template>
+
       <el-table :data="historyList" stripe class="history-table" row-key="qrcodeId" @selection-change="handleHistorySelectionChange">
         <el-table-column type="selection" width="52" />
-        <el-table-column prop="qrcodeId" label="二维码ID" />
-        <el-table-column prop="cjId" label="院内编码" />
-        <el-table-column prop="spec" label="规格" />
-        <el-table-column prop="batchNo" label="批号" />
-        <el-table-column prop="generateTime" label="生成时间" />
-        <el-table-column label="操作" width="220">
+        <el-table-column prop="qrcodeId" label="二维码ID" min-width="190" show-overflow-tooltip />
+        <el-table-column prop="drugName" label="品名" min-width="140" show-overflow-tooltip />
+        <el-table-column prop="drugOrigin" label="药材产地" min-width="120" show-overflow-tooltip />
+        <el-table-column prop="labelAmount" label="装量" min-width="120" />
+        <el-table-column prop="batchNo" label="批号" min-width="110" />
+        <el-table-column prop="productionDateDisplay" label="生产日期" min-width="120" />
+        <el-table-column prop="expiryDateDisplay" label="保质期至" min-width="120" />
+        <el-table-column prop="generateTime" label="生成时间" min-width="170" />
+        <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="handleView(row)">查看</el-button>
+            <el-button link type="primary" @click="handleView(row)">查看标签</el-button>
             <el-button link type="success" :loading="printing" :disabled="!row.qrcodeId || batchPrinting" @click="handlePrint(row)">打印</el-button>
           </template>
         </el-table-column>
       </el-table>
     </el-card>
+
+    <el-dialog v-if="isManagePage" v-model="previewDialogVisible" title="标签预览" width="720px">
+      <LabelPrintCard :label="previewLabelData" :qrcode-url="previewRecord?.qrcodeUrl || ''" compact />
+      <template #footer>
+        <el-button @click="previewDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="printing" @click="handlePrint(previewRecord)">打印标签</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog v-if="isGeneratePage" v-model="batchDialogVisible" title="批量生成二维码" width="500px">
       <el-form label-width="100px">
@@ -214,6 +295,7 @@
 import { ref, reactive, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { generateQRCode, generateBatchQRCode, printMergedQRCode, testPrinterConnection, getQRCodeHistory, getEnterpriseList, getQrcodeDrugList } from '@/api'
+import LabelPrintCard from '@/components/LabelPrintCard.vue'
 import { useUserStore } from '@/stores/user'
 import { ElMessage } from 'element-plus'
 
@@ -237,9 +319,13 @@ const latestQrcodeId = ref('')
 const batchDialogVisible = ref(false)
 const batchCount = ref(10)
 const selectedHistoryRows = ref([])
+const generatedRecord = ref(null)
+const previewDialogVisible = ref(false)
+const previewRecord = ref(null)
 const PRINTER_CONFIG_STORAGE_KEY = 'qrcodePrinterConfig'
 
 const printerConfig = reactive({
+  enablePrinter: false,
   printerHost: '',
   printerPort: 9100,
   printerProtocol: 'zpl',
@@ -254,6 +340,7 @@ const drugLoadingMore = ref(false)
 const drugKeyword = ref('')
 const drugPage = ref(1)
 const drugHasMore = ref(true)
+const historyList = ref([])
 const DRUG_PAGE_SIZE = 30
 let drugDropdownWrapEl = null
 
@@ -262,6 +349,9 @@ const form = reactive({
   cjId: '',
   spec: '',
   batchNo: '',
+  drugOrigin: '',
+  productionDate: '',
+  expiryDate: '',
   num: 7,
   weight: 0,
   traceUrl: ''
@@ -278,13 +368,127 @@ const rules = {
     { required: true, message: '请输入批号', trigger: 'blur' },
     { pattern: /^\d{5,10}$/, message: '批号为5-10位数字', trigger: 'blur' }
   ],
+  drugOrigin: [{ required: true, message: '请输入药材产地', trigger: 'blur' }],
+  productionDate: [{ required: true, message: '请选择生产日期', trigger: 'change' }],
+  expiryDate: [{ required: true, message: '请选择保质期至', trigger: 'change' }],
   traceUrl: [
     { required: true, message: '请输入追溯网址', trigger: 'blur' },
     { pattern: /^https?:\/\//, message: '追溯网址需以 http:// 或 https:// 开头', trigger: 'blur' }
   ]
 }
 
-const historyList = ref([])
+const selectedDrug = computed(() => drugOptions.value.find(item => item.cjId === form.cjId) || null)
+
+const printerModeText = computed(() => (printerConfig.enablePrinter ? '喷码枪直连打印' : '浏览器打印标签'))
+
+const printerHintText = computed(() => {
+  if (printerConfig.enablePrinter) {
+    return '打印时会把标签指令直接发送到已配置喷码枪。'
+  }
+  return '打印时会打开浏览器打印窗口，不需要配置喷码枪参数。'
+})
+
+const normalizeSpecText = (spec) => {
+  const raw = String(spec || '').trim()
+  if (!raw) return ''
+  return /g$/i.test(raw) ? raw : `${raw}g`
+}
+
+const formatDateDisplay = (value, precision = 'day') => {
+  const raw = String(value || '').trim()
+  if (!raw) return '--'
+  if (precision === 'month' && /^\d{4}年\d{1,2}月$/.test(raw)) return raw
+  if (precision === 'day' && /^\d{4}\.\d{2}\.\d{2}$/.test(raw)) return raw
+  if (precision === 'month') {
+    const dottedMatch = raw.match(/^(\d{4})\.(\d{2})\.(\d{2})$/)
+    if (dottedMatch) {
+      return `${dottedMatch[1]}年${Number(dottedMatch[2])}月`
+    }
+    const monthMatch = raw.match(/^(\d{4})[-/.](\d{1,2})$/)
+    if (monthMatch) {
+      return `${monthMatch[1]}年${Number(monthMatch[2])}月`
+    }
+  }
+
+  const normalized = raw.replace(/\//g, '-')
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    const [year, month, day] = normalized.split('-')
+    if (precision === 'month') {
+      return `${year}年${Number(month)}月`
+    }
+    return `${year}.${month}.${day}`
+  }
+
+  const parsed = new Date(normalized)
+  if (Number.isNaN(parsed.getTime())) {
+    return raw
+  }
+
+  const year = parsed.getFullYear()
+  const month = `${parsed.getMonth() + 1}`.padStart(2, '0')
+  const day = `${parsed.getDate()}`.padStart(2, '0')
+  if (precision === 'month') {
+    return `${year}年${Number(month)}月`
+  }
+  return `${year}.${month}.${day}`
+}
+
+const formatLabelAmount = ({ spec, num, unit }) => {
+  const specText = normalizeSpecText(spec)
+  if (!specText) return '--'
+
+  const count = Number(num)
+  const displayUnit = String(unit || '袋').trim() || '袋'
+  if (!Number.isFinite(count) || count <= 0) {
+    return specText
+  }
+
+  return `${specText}*${Math.trunc(count)}${displayUnit}`
+}
+
+const buildCurrentGeneratedRecord = () => ({
+  qrcodeId: latestQrcodeId.value,
+  qrcodeContent: qrcodeContent.value,
+  qrcodeUrl: qrcodeUrl.value,
+  traceUrl: traceUrl.value,
+  drugName: selectedDrug.value?.drugName || '',
+  drugOrigin: form.drugOrigin,
+  spec: normalizeSpecText(form.spec),
+  num: form.num,
+  unit: selectedDrug.value?.unit || '袋',
+  batchNo: form.batchNo,
+  productionDate: form.productionDate,
+  expiryDate: form.expiryDate,
+  labelAmount: formatLabelAmount({
+    spec: form.spec,
+    num: form.num,
+    unit: selectedDrug.value?.unit
+  })
+})
+
+const buildLabelData = (source = {}) => {
+  const fallbackDrugName = selectedDrug.value?.drugName || (source?.cjId ? `CJID:${source.cjId}` : '')
+  const fallbackUnit = selectedDrug.value?.unit || source?.unit || '袋'
+
+  return {
+    drugName: String(source?.drugName || fallbackDrugName || '--').trim() || '--',
+    drugOrigin: String(source?.drugOrigin || form.drugOrigin || '--').trim() || '--',
+    labelAmount: String(
+      source?.labelAmount ||
+      formatLabelAmount({
+        spec: source?.spec ?? form.spec,
+        num: source?.num ?? form.num,
+        unit: source?.unit || fallbackUnit
+      })
+    ).trim() || '--',
+    batchNo: String(source?.batchNo || form.batchNo || '--').trim() || '--',
+    productionDate: formatDateDisplay(source?.productionDateDisplay || source?.productionDate || form.productionDate, 'day'),
+    expiryDate: formatDateDisplay(source?.expiryDateDisplay || source?.expiryDate || form.expiryDate, 'month')
+  }
+}
+
+const generatedLabelData = computed(() => buildLabelData(generatedRecord.value || buildCurrentGeneratedRecord()))
+const previewLabelData = computed(() => buildLabelData(previewRecord.value || {}))
 
 const calculateWeight = () => {
   const specNum = Number(form.spec)
@@ -337,6 +541,7 @@ const fetchDrugOptions = async ({ append = false } = {}) => {
       cjId: item.cjId,
       drugName: item.drugName,
       specRange: item.specRange,
+      unit: item.unit || '袋',
       displayName: item.displayName || `${item.drugName || ''} ${item.specRange || ''}`.trim()
     }))
 
@@ -441,29 +646,33 @@ const loadEnterprises = async () => {
 const handleGenerate = async () => {
   if (!formRef.value) return
   await formRef.value.validate(async (valid) => {
-    if (valid) {
-      generating.value = true
-      try {
-        const data = {
-          ...form,
-          spec: form.spec + 'g'
-        }
-        const res = await generateQRCode(data)
-        if (res.code === '0000') {
-          qrcodeUrl.value = res.data.qrcodeUrl
-          qrcodeContent.value = res.data.qrcodeContent
-          base64Str.value = res.data.base64Str
-          traceUrl.value = res.data.traceUrl || form.traceUrl
-          latestQrcodeId.value = res.data.qrcodeId || ''
-          ElMessage.success('生成成功')
-        } else {
-          ElMessage.error(res.msg || '生成失败')
-        }
-      } catch (error) {
-        ElMessage.error('生成失败：' + error.message)
-      } finally {
-        generating.value = false
+    if (!valid) return
+
+    generating.value = true
+    try {
+      const data = {
+        ...form,
+        spec: normalizeSpecText(form.spec)
       }
+      const res = await generateQRCode(data)
+      if (res.code === '0000') {
+        qrcodeUrl.value = res.data.qrcodeUrl
+        qrcodeContent.value = res.data.qrcodeContent
+        base64Str.value = res.data.base64Str
+        traceUrl.value = res.data.traceUrl || form.traceUrl
+        latestQrcodeId.value = res.data.qrcodeId || ''
+        generatedRecord.value = {
+          ...buildCurrentGeneratedRecord(),
+          ...res.data
+        }
+        ElMessage.success('生成成功')
+      } else {
+        ElMessage.error(res.msg || '生成失败')
+      }
+    } catch (error) {
+      ElMessage.error('生成失败：' + error.message)
+    } finally {
+      generating.value = false
     }
   })
 }
@@ -477,6 +686,7 @@ const handleReset = () => {
   base64Str.value = ''
   traceUrl.value = ''
   latestQrcodeId.value = ''
+  generatedRecord.value = null
 }
 
 const handleDownload = () => {
@@ -492,6 +702,7 @@ const normalizePrinterConfig = () => {
   const normalizedTimeout = Number(printerConfig.printerTimeout)
   const normalizedCopies = Number(printerConfig.copies)
 
+  printerConfig.enablePrinter = Boolean(printerConfig.enablePrinter)
   printerConfig.printerHost = String(printerConfig.printerHost || '').trim()
   printerConfig.printerPort = Number.isFinite(normalizedPort) ? Math.min(Math.max(Math.trunc(normalizedPort), 1), 65535) : 9100
   printerConfig.printerTimeout = Number.isFinite(normalizedTimeout) ? Math.min(Math.max(Math.trunc(normalizedTimeout), 1), 30) : 3
@@ -513,6 +724,7 @@ const loadPrinterConfig = () => {
       return
     }
 
+    printerConfig.enablePrinter = parsed.enablePrinter ?? Boolean(parsed.printerHost)
     printerConfig.printerHost = parsed.printerHost || ''
     printerConfig.printerPort = parsed.printerPort ?? 9100
     printerConfig.printerProtocol = parsed.printerProtocol || 'zpl'
@@ -520,6 +732,7 @@ const loadPrinterConfig = () => {
     printerConfig.copies = parsed.copies ?? 1
     normalizePrinterConfig()
   } catch {
+    printerConfig.enablePrinter = false
     printerConfig.printerHost = ''
     printerConfig.printerPort = 9100
     printerConfig.printerProtocol = 'zpl'
@@ -531,6 +744,7 @@ const loadPrinterConfig = () => {
 const savePrinterConfig = (showMessage = true) => {
   normalizePrinterConfig()
   localStorage.setItem(PRINTER_CONFIG_STORAGE_KEY, JSON.stringify({
+    enablePrinter: printerConfig.enablePrinter,
     printerHost: printerConfig.printerHost,
     printerPort: printerConfig.printerPort,
     printerProtocol: printerConfig.printerProtocol,
@@ -543,6 +757,7 @@ const savePrinterConfig = (showMessage = true) => {
 }
 
 const resetPrinterConfig = () => {
+  printerConfig.enablePrinter = false
   printerConfig.printerHost = ''
   printerConfig.printerPort = 9100
   printerConfig.printerProtocol = 'zpl'
@@ -553,6 +768,11 @@ const resetPrinterConfig = () => {
 
 const handleTestConnection = async () => {
   savePrinterConfig(false)
+
+  if (!printerConfig.enablePrinter) {
+    ElMessage.warning('当前已关闭喷码枪直连打印')
+    return
+  }
 
   if (!printerConfig.printerHost) {
     ElMessage.warning('请先填写打印机IP')
@@ -580,23 +800,285 @@ const handleTestConnection = async () => {
   }
 }
 
+const escapeHtml = (value) => String(value || '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;')
+
+const toAbsoluteAssetUrl = (url) => {
+  const raw = String(url || '').trim()
+  if (!raw) return ''
+  if (/^https?:\/\//i.test(raw)) return raw
+  return `${window.location.origin}${raw.startsWith('/') ? raw : `/${raw}`}`
+}
+
+const buildBrowserPrintHtml = (items) => {
+  const buildLabelRowHtml = (label, value) => `
+    <div class="print-label__row">
+      <span class="print-label__label-group">
+        <span class="print-label__label-text">${escapeHtml(label)}</span>
+        <span class="print-label__label-colon">：</span>
+      </span>
+      <span class="print-label__value">${escapeHtml(value)}</span>
+    </div>
+  `
+
+  const cards = items.map(item => `
+    <section class="print-label">
+      <div class="print-label__main">
+        <div class="print-label__content">
+          ${buildLabelRowHtml('品　名', item.label.drugName)}
+          ${buildLabelRowHtml('药材产地', item.label.drugOrigin)}
+          ${buildLabelRowHtml('装　量', item.label.labelAmount)}
+          ${buildLabelRowHtml('产品批号', item.label.batchNo)}
+          ${buildLabelRowHtml('生产日期', item.label.productionDate)}
+          ${buildLabelRowHtml('保质期至', item.label.expiryDate)}
+        </div>
+        <div class="print-label__qr">
+          ${item.qrcodeUrl ? `<img src="${escapeHtml(item.qrcodeUrl)}" alt="标签二维码" />` : '<div class="print-label__qr-placeholder">待生成二维码</div>'}
+        </div>
+      </div>
+      <div class="print-label__stamp">质量合格</div>
+    </section>
+  `).join('')
+
+  return `<!DOCTYPE html>
+  <html lang="zh-CN">
+    <head>
+      <meta charset="UTF-8" />
+      <title>标签打印</title>
+      <style>
+        @page {
+          size: 50mm 35mm;
+          margin: 0;
+        }
+
+        * {
+          box-sizing: border-box;
+        }
+
+        body {
+          margin: 0;
+          font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif;
+          background: #aebfd2;
+          color: #111;
+        }
+
+        .print-sheet {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 16px;
+          justify-content: center;
+          padding: 16px;
+        }
+
+        .print-label {
+          width: 50mm;
+          height: 35mm;
+          min-height: 35mm;
+          display: flex;
+          flex-direction: column;
+          padding: 2.4mm 2.6mm 2.4mm;
+          border: 0.3mm solid #c1cad4;
+          background: #fff;
+          break-inside: avoid;
+          box-shadow: 0 6px 16px rgba(32, 47, 66, 0.18);
+          overflow: hidden;
+        }
+
+        .print-label__main {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 14.4mm;
+          gap: 1.5mm;
+          align-items: start;
+          flex: 1 1 auto;
+          min-height: 0;
+        }
+
+        .print-label__content {
+          display: flex;
+          flex-direction: column;
+          gap: 0.55mm;
+          padding-top: 0;
+        }
+
+        .print-label__row {
+          display: grid;
+          grid-template-columns: 13.4mm minmax(0, 1fr);
+          gap: 0.6mm;
+          align-items: baseline;
+          font-size: 6.9pt;
+          line-height: 1.04;
+          font-weight: 800;
+        }
+
+        .print-label__label-group {
+          display: grid;
+          grid-template-columns: 11.6mm 1.6mm;
+          align-items: baseline;
+        }
+
+        .print-label__label-text {
+          white-space: pre;
+          letter-spacing: 0.02em;
+        }
+
+        .print-label__label-colon {
+          display: inline-flex;
+          justify-content: flex-end;
+        }
+
+        .print-label__value {
+          min-width: 0;
+          white-space: nowrap;
+          overflow: visible;
+          text-overflow: clip;
+        }
+
+        .print-label__qr {
+          display: flex;
+          align-items: flex-start;
+          justify-content: flex-end;
+          min-height: 14.4mm;
+          padding-top: 0;
+        }
+
+        .print-label__qr img {
+          width: 13mm;
+          height: auto;
+          object-fit: contain;
+        }
+
+        .print-label__qr-placeholder {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 13mm;
+          aspect-ratio: 1;
+          color: #6f7d89;
+          font-size: 6.2pt;
+          border: 0.3mm dashed #cad3db;
+          background: #fafcfe;
+        }
+
+        .print-label__stamp {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 15.8mm;
+          height: 6.6mm;
+          margin: 1.1mm auto 0;
+          border: 0.45mm solid #111;
+          border-radius: 50%;
+          font-size: 8pt;
+          font-weight: 800;
+          letter-spacing: 0.02em;
+          color: #111;
+          background: #fff;
+          flex: 0 0 auto;
+        }
+
+        @media print {
+          body {
+            background: #fff;
+          }
+
+          .print-sheet {
+            padding: 0;
+            gap: 0;
+            display: block;
+          }
+
+          .print-label {
+            box-shadow: none;
+            page-break-inside: avoid;
+            break-after: page;
+            page-break-after: always;
+            margin: 0;
+          }
+
+          .print-label:last-child {
+            break-after: auto;
+            page-break-after: auto;
+          }
+        }
+      </style>
+    </head>
+    <body>
+      <main class="print-sheet">${cards}</main>
+      <script>
+        const images = Array.from(document.images || []);
+        Promise.all(images.map((img) => {
+          if (img.complete) return Promise.resolve();
+          return new Promise((resolve) => {
+            img.onload = resolve;
+            img.onerror = resolve;
+          });
+        })).then(() => {
+          setTimeout(() => {
+            window.focus();
+            window.print();
+          }, 120);
+        });
+        window.onafterprint = () => window.close();
+      <\/script>
+    </body>
+  </html>`
+}
+
+const openBrowserPrint = (rows = []) => {
+  const repeatedRows = rows.flatMap(row => Array.from({ length: printerConfig.copies }, () => row))
+  const printableItems = repeatedRows
+    .map(row => ({
+      label: buildLabelData(row || {}),
+      qrcodeUrl: toAbsoluteAssetUrl(row?.qrcodeUrl || qrcodeUrl.value)
+    }))
+    .filter(item => item.qrcodeUrl)
+
+  if (printableItems.length === 0) {
+    ElMessage.warning('暂无可打印的标签')
+    return false
+  }
+
+  const printWindow = window.open('', '_blank', 'width=960,height=720')
+  if (!printWindow) {
+    ElMessage.error('浏览器阻止了打印窗口，请允许弹窗后重试')
+    return false
+  }
+
+  printWindow.document.write(buildBrowserPrintHtml(printableItems))
+  printWindow.document.close()
+  return true
+}
+
 const handlePrint = async (row = null) => {
   if (batchPrinting.value) {
     ElMessage.warning('批量打印进行中，请稍后')
     return
   }
 
-  const targetQrcodeId = row?.qrcodeId || latestQrcodeId.value
-  const targetQrcodeContent = row?.qrcodeContent || qrcodeContent.value
+  const targetRecord = row || generatedRecord.value || buildCurrentGeneratedRecord()
+  const targetQrcodeId = targetRecord?.qrcodeId || latestQrcodeId.value
+  const targetQrcodeContent = targetRecord?.qrcodeContent || qrcodeContent.value
 
   if (!targetQrcodeId && !targetQrcodeContent) {
     ElMessage.warning('暂无可打印的二维码')
     return
   }
 
+  savePrinterConfig(false)
+
+  if (!printerConfig.enablePrinter) {
+    if (openBrowserPrint([targetRecord])) {
+      ElMessage.success(`已打开浏览器打印窗口${printerConfig.copies > 1 ? `，共 ${printerConfig.copies} 份` : ''}`)
+    }
+    return
+  }
+
   printing.value = true
   try {
-    savePrinterConfig(false)
     const res = await printMergedQRCode({
       qrcodeId: targetQrcodeId,
       qrcodeContent: targetQrcodeContent,
@@ -623,7 +1105,7 @@ const handlePrint = async (row = null) => {
         await navigator.clipboard.writeText(command)
         ElMessage.success((res.data?.message || '打印指令已生成') + '，指令已复制到剪贴板')
         return
-      } catch (error) {
+      } catch {
         ElMessage.success(res.data?.message || '打印指令已生成')
         return
       }
@@ -654,6 +1136,14 @@ const handleBatchPrint = async () => {
 
   batchPrinting.value = true
   savePrinterConfig(false)
+
+  if (!printerConfig.enablePrinter) {
+    if (openBrowserPrint(selectedHistoryRows.value)) {
+      ElMessage.success(`已打开批量标签打印窗口，共 ${selectedHistoryRows.value.length * printerConfig.copies} 张`)
+    }
+    batchPrinting.value = false
+    return
+  }
 
   let successCount = 0
   let failCount = 0
@@ -706,7 +1196,7 @@ const handleBatchPrint = async () => {
 }
 
 const handleBatchGenerate = () => {
-  if (!form.enterpriseCode || !form.cjId || !form.spec || !form.batchNo || !form.num || !form.traceUrl) {
+  if (!form.enterpriseCode || !form.cjId || !form.spec || !form.batchNo || !form.drugOrigin || !form.productionDate || !form.expiryDate || !form.num || !form.traceUrl) {
     ElMessage.warning('请先完善上方二维码参数后再批量生成')
     return
   }
@@ -722,11 +1212,15 @@ const handleConfirmBatchGenerate = async () => {
       const batchNo = Number.isFinite(baseBatch)
         ? String(baseBatch + index).padStart(width, '0')
         : form.batchNo
+
       return {
         enterpriseCode: form.enterpriseCode,
         cjId: form.cjId,
-        spec: form.spec + 'g',
+        spec: normalizeSpecText(form.spec),
         batchNo,
+        drugOrigin: form.drugOrigin,
+        productionDate: form.productionDate,
+        expiryDate: form.expiryDate,
         num: form.num,
         weight: form.weight,
         traceUrl: form.traceUrl
@@ -752,32 +1246,40 @@ const handleConfirmBatchGenerate = async () => {
 }
 
 const handleView = (row) => {
-  qrcodeUrl.value = row.qrcodeUrl
-  qrcodeContent.value = row.qrcodeContent || row.qrcodeOrigin
-  base64Str.value = row.base64Str
-  traceUrl.value = row.traceUrl || ''
-  latestQrcodeId.value = row.qrcodeId || ''
+  previewRecord.value = row
+  previewDialogVisible.value = true
 }
 
 const loadHistory = async () => {
   try {
-        const res = await getQRCodeHistory({ page: 1, size: 10 })
-        if (res.code === '0000') {
-          historyList.value = (res.data.list || []).map(item => ({
-            qrcodeId: item.qrcodeId,
-            cjId: item.cjId,
-            spec: item.spec,
-            batchNo: item.batchNo,
-            generateTime: item.generateTime,
-            qrcodeUrl: item.qrcodeUrl,
-            qrcodeContent: item.qrcodeContent || item.qrcodeOrigin,
-            base64Str: item.base64Str,
-            traceUrl: item.traceUrl
-          }))
-          selectedHistoryRows.value = []
-        } else {
-          ElMessage.error(res.msg || '历史记录加载失败')
-        }
+    const res = await getQRCodeHistory({ page: 1, size: 10 })
+    if (res.code === '0000') {
+      historyList.value = (res.data.list || [])
+        .filter(item => item.type === 'generate')
+        .map(item => ({
+          qrcodeId: item.qrcodeId,
+          cjId: item.cjId,
+          drugName: item.drugName,
+          drugOrigin: item.drugOrigin,
+          labelAmount: item.labelAmount,
+          spec: item.spec,
+          num: item.num,
+          unit: item.unit,
+          batchNo: item.batchNo,
+          productionDate: item.productionDate,
+          productionDateDisplay: item.productionDateDisplay,
+          expiryDate: item.expiryDate,
+          expiryDateDisplay: item.expiryDateDisplay,
+          generateTime: item.generateTime,
+          qrcodeUrl: item.qrcodeUrl,
+          qrcodeContent: item.qrcodeContent || item.qrcodeOrigin,
+          base64Str: item.base64Str,
+          traceUrl: item.traceUrl
+        }))
+      selectedHistoryRows.value = []
+    } else {
+      ElMessage.error(res.msg || '历史记录加载失败')
+    }
   } catch (error) {
     ElMessage.error('历史记录加载失败：' + error.message)
   }
@@ -820,6 +1322,7 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
 }
 
 .generator-form {
@@ -852,36 +1355,54 @@ onBeforeUnmount(() => {
   margin-top: 6px;
   padding: 18px;
   border: 1px solid #e7e2d6;
-  border-radius: 6px;
+  border-radius: 12px;
   background: #faf9f5;
 }
 
-.qrcode-result h4 {
+.result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 10px;
+}
+
+.result-head h4 {
+  margin: 0;
   color: #3d4a36;
   font-size: 15px;
 }
 
-.qrcode-preview {
-  text-align: center;
-  margin: 16px 0;
+.result-tip {
+  margin: 0 0 14px;
+  color: #6f6555;
+  font-size: 13px;
 }
 
-.qrcode-preview img {
-  max-width: 200px;
-  border: 1px solid #d6d0c2;
-  border-radius: 6px;
-  background: #fff;
-  padding: 10px;
+.result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 16px 0 12px;
 }
 
-.module-card :deep(.el-table) {
-  border-radius: 6px;
-  overflow: hidden;
+.result-meta {
+  padding-top: 10px;
+  border-top: 1px dashed #ddd4c3;
+}
+
+.result-meta p {
+  margin: 8px 0 0;
+  color: #4f4a40;
+  word-break: break-all;
 }
 
 .printer-form {
   padding-top: 6px;
+}
+
+.printer-mode-alert {
+  margin-bottom: 18px;
 }
 
 .printer-actions {
@@ -894,4 +1415,21 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.module-card :deep(.el-table) {
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.history-card :deep(.el-table .cell) {
+  word-break: break-word;
+}
+
+@media (max-width: 768px) {
+  .card-header,
+  .result-head,
+  .history-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
 </style>
