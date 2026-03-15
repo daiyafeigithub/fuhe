@@ -852,7 +852,7 @@ const buildBrowserPrintHtml = (items) => {
       <title></title>
       <style>
         @page {
-          size: 50mm 35mm;
+          size: A4 portrait;
           margin: 0 !important;
         }
 
@@ -870,17 +870,23 @@ const buildBrowserPrintHtml = (items) => {
 
         body {
           font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif;
-          background: #eef1f4;
+          background: #f2f4f8;
           color: #111;
+          -webkit-print-color-adjust: exact;
+          print-color-adjust: exact;
         }
 
         .print-sheet {
+          width: 210mm;
+          min-height: 297mm;
+          margin: 0 auto;
+          padding: 1.5mm 2mm;
           display: flex;
           flex-wrap: wrap;
-          gap: 16px;
-          justify-content: center;
-          padding: 16px;
-          min-height: 100%;
+          align-content: flex-start;
+          gap: 2mm;
+          background: #fff;
+          box-shadow: 0 8px 22px rgba(31, 47, 66, 0.16);
         }
 
         .print-label {
@@ -889,11 +895,12 @@ const buildBrowserPrintHtml = (items) => {
           min-height: 35mm;
           display: flex;
           flex-direction: column;
-          padding: 2.4mm 2.6mm 2.4mm;
-          border: 0.3mm solid #c1cad4;
+          padding: 2mm 2.2mm 2mm;
+          border: none;
           background: #fff;
           break-inside: avoid;
-          box-shadow: 0 6px 16px rgba(32, 47, 66, 0.18);
+          page-break-inside: avoid;
+          box-shadow: none;
           overflow: hidden;
         }
 
@@ -973,40 +980,27 @@ const buildBrowserPrintHtml = (items) => {
         }
 
         .print-label__stamp {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          width: 15.8mm;
-          height: 6.6mm;
-          margin: 1.1mm auto 0;
-          border: 0.45mm solid #111;
-          border-radius: 50%;
-          font-size: 8pt;
-          font-weight: 800;
-          letter-spacing: 0.02em;
-          color: #111;
-          background: #fff;
-          flex: 0 0 auto;
+          display: none;
         }
 
         @media print {
           html,
           body {
-            width: 50mm;
-            height: 35mm;
+            width: auto;
+            height: auto;
             margin: 0 !important;
             padding: 0 !important;
-            overflow: hidden;
+            overflow: visible;
             background: #fff !important;
           }
 
           .print-sheet {
-            width: 50mm;
-            min-height: 35mm;
-            padding: 0;
+            width: 210mm;
+            min-height: 297mm;
+            padding: 1.5mm 2mm;
             margin: 0;
-            gap: 0;
-            display: block;
+            gap: 2mm;
+            box-shadow: none;
           }
 
           .print-label {
@@ -1014,15 +1008,9 @@ const buildBrowserPrintHtml = (items) => {
             height: 35mm;
             min-height: 35mm;
             box-shadow: none;
-            page-break-inside: avoid;
-            break-after: page;
-            page-break-after: always;
-            margin: 0;
-          }
-
-          .print-label:last-child {
             break-after: auto;
             page-break-after: auto;
+            margin: 0;
           }
         }
       </style>
@@ -1063,7 +1051,7 @@ const showBrowserPrintSettingTip = () => {
   }
 
   if (shouldShow) {
-    ElMessage.info('浏览器打印请在“更多设置”里关闭页眉和页脚，边距选“无”，纸张选 50mm x 35mm。')
+    ElMessage.info('浏览器打印请在“更多设置”里关闭页眉和页脚，边距选“无”，纸张选 A4，缩放选“实际大小/100%”，标签规格使用 50mm x 35mm。')
   }
 }
 

@@ -4,7 +4,9 @@ param(
     [int]$NginxPort = 80,
     [int]$BackendPort = 8000,
     [string]$LogFile = "",
-    [string]$MedicineCsv = ""
+    [string]$MedicineCsv = "",
+    [switch]$ForceRedeploy,
+    [string]$GitBranch = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,6 +64,12 @@ function Ensure-Admin {
         }
         if ($MedicineCsv) {
             $argList += @("-MedicineCsv", "`"$MedicineCsv`"")
+        }
+        if ($ForceRedeploy) {
+            $argList += "-ForceRedeploy"
+        }
+        if ($GitBranch) {
+            $argList += @("-GitBranch", "`"$GitBranch`"")
         }
         Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs
         exit 0
@@ -611,9 +619,28 @@ Write-Step "Clone or update project source"
 $RemoteUpdated = $false
 if (Test-Path -Path (Join-Path $ProjectRoot ".git")) {
     Write-Log "Existing repo found, pulling latest changes..."
+    if ($GitBranch) {
+        Write-Log "Switching deployment branch to: $GitBranch"
+        & git -C $ProjectRoot checkout $GitBranch
+        if ($LASTEXITCODE -ne 0) {
+            throw "Git checkout failed for branch '$GitBranch'."
+        }
+    }
     $headBefore = (& git -C $ProjectRoot rev-parse HEAD 2>$null).Trim()
     & git -C $ProjectRoot fetch --all --prune
-    & git -C $ProjectRoot pull
+    if ($LASTEXITCODE -ne 0) {
+        throw "Git fetch failed."
+    }
+
+    if ($GitBranch) {
+        & git -C $ProjectRoot pull origin $GitBranch
+    } else {
+        & git -C $ProjectRoot pull
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Git pull failed. Please resolve local repository conflicts in $ProjectRoot and rerun deployment."
+    }
+
     $headAfter = (& git -C $ProjectRoot rev-parse HEAD 2>$null).Trim()
     if ($headBefore -and $headAfter -and ($headBefore -ne $headAfter)) {
         $RemoteUpdated = $true
@@ -627,10 +654,22 @@ if (Test-Path -Path (Join-Path $ProjectRoot ".git")) {
     if (Test-Path -Path $ProjectRoot) {
         Remove-Item -Path $ProjectRoot -Recurse -Force
     }
-    & git clone $RepoUrl $ProjectRoot
+    if ($GitBranch) {
+        & git clone --branch $GitBranch $RepoUrl $ProjectRoot
+    } else {
+        & git clone $RepoUrl $ProjectRoot
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Git clone failed."
+    }
     $RemoteUpdated = $true
     Write-Log "Fresh clone completed. Full backend/frontend rebuild required."
     Write-Log "Project clone complete: $ProjectRoot"
+}
+
+$RequireFullRebuild = $RemoteUpdated -or $ForceRedeploy
+if ($ForceRedeploy) {
+    Write-Log "Force redeploy enabled. Full backend/frontend rebuild will run even when no remote update is detected." -Level WARN
 }
 
 Write-Step "Build backend environment"
@@ -647,8 +686,8 @@ $reqFile = Join-Path $ProjectRoot "backend\requirements.txt"
 $reqHashFile = Join-Path $venvDir ".req_hash"
 $reqHash = (Get-FileHash $reqFile -Algorithm MD5).Hash
 $skipPip = $false
-if ($RemoteUpdated) {
-    Write-Log "Remote code updated. Forcing backend dependency rebuild."
+if ($RequireFullRebuild) {
+    Write-Log "Remote code updated or force redeploy enabled. Forcing backend dependency rebuild."
 } else {
     if (Test-Path -Path $reqHashFile) {
         if ((Get-Content $reqHashFile -Raw).Trim() -eq $reqHash) {
@@ -694,8 +733,8 @@ $distIndex = Join-Path $frontendDir "dist\index.html"
 
 Push-Location $frontendDir
 try {
-    if ($RemoteUpdated) {
-        Write-Log "Remote code updated. Forcing frontend rebuild (npm install + npm run build)."
+    if ($RequireFullRebuild) {
+        Write-Log "Remote code updated or force redeploy enabled. Forcing frontend rebuild (npm install + npm run build)."
         & npm install
         Write-Log "npm install complete"
         & npm run build
