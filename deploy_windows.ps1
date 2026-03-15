@@ -597,10 +597,19 @@ Refresh-Path
 Write-Log "PATH refreshed"
 
 Write-Step "Clone or update project source"
+$RemoteUpdated = $false
 if (Test-Path -Path (Join-Path $ProjectRoot ".git")) {
     Write-Log "Existing repo found, pulling latest changes..."
+    $headBefore = (& git -C $ProjectRoot rev-parse HEAD 2>$null).Trim()
     & git -C $ProjectRoot fetch --all --prune
     & git -C $ProjectRoot pull
+    $headAfter = (& git -C $ProjectRoot rev-parse HEAD 2>$null).Trim()
+    if ($headBefore -and $headAfter -and ($headBefore -ne $headAfter)) {
+        $RemoteUpdated = $true
+        Write-Log "Remote update detected: $headBefore -> $headAfter"
+    } else {
+        Write-Log "No remote code changes detected."
+    }
     Write-Log "Project update complete: $ProjectRoot"
 } else {
     Write-Log "First deployment, cloning from $RepoUrl..."
@@ -608,6 +617,8 @@ if (Test-Path -Path (Join-Path $ProjectRoot ".git")) {
         Remove-Item -Path $ProjectRoot -Recurse -Force
     }
     & git clone $RepoUrl $ProjectRoot
+    $RemoteUpdated = $true
+    Write-Log "Fresh clone completed. Full backend/frontend rebuild required."
     Write-Log "Project clone complete: $ProjectRoot"
 }
 
@@ -625,10 +636,14 @@ $reqFile = Join-Path $ProjectRoot "backend\requirements.txt"
 $reqHashFile = Join-Path $venvDir ".req_hash"
 $reqHash = (Get-FileHash $reqFile -Algorithm MD5).Hash
 $skipPip = $false
-if (Test-Path -Path $reqHashFile) {
-    if ((Get-Content $reqHashFile -Raw).Trim() -eq $reqHash) {
-        Write-Log "requirements.txt unchanged (hash: $reqHash), skipping pip install"
-        $skipPip = $true
+if ($RemoteUpdated) {
+    Write-Log "Remote code updated. Forcing backend dependency rebuild."
+} else {
+    if (Test-Path -Path $reqHashFile) {
+        if ((Get-Content $reqHashFile -Raw).Trim() -eq $reqHash) {
+            Write-Log "requirements.txt unchanged (hash: $reqHash), skipping pip install"
+            $skipPip = $true
+        }
     }
 }
 if (-not $skipPip) {
@@ -647,20 +662,28 @@ $distIndex = Join-Path $frontendDir "dist\index.html"
 
 Push-Location $frontendDir
 try {
-    if (Test-Path -Path $nodeModulesDir) {
-        Write-Log "node_modules already exists, skipping npm install"
-    } else {
-        Write-Log "Installing frontend dependencies with npm install..."
+    if ($RemoteUpdated) {
+        Write-Log "Remote code updated. Forcing frontend rebuild (npm install + npm run build)."
         & npm install
         Write-Log "npm install complete"
-    }
-
-    if (Test-Path -Path $distIndex) {
-        Write-Log "Frontend dist already exists, skipping npm run build"
-    } else {
-        Write-Log "Building frontend with npm run build..."
         & npm run build
         Write-Log "Frontend build complete"
+    } else {
+        if (Test-Path -Path $nodeModulesDir) {
+            Write-Log "node_modules already exists, skipping npm install"
+        } else {
+            Write-Log "Installing frontend dependencies with npm install..."
+            & npm install
+            Write-Log "npm install complete"
+        }
+
+        if (Test-Path -Path $distIndex) {
+            Write-Log "Frontend dist already exists, skipping npm run build"
+        } else {
+            Write-Log "Building frontend with npm run build..."
+            & npm run build
+            Write-Log "Frontend build complete"
+        }
     }
 } finally {
     Pop-Location
