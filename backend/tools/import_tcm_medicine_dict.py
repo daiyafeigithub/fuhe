@@ -1,30 +1,34 @@
 #!/usr/bin/env python3
-"""Import/update tcm_medicine_dict records from a TSV-like text file.
+"""Import/update tcm_medicine_dict records from CSV.
 
-Expected columns (tab-separated preferred):
-序号\t商品名\t规格\t单位\tCJID
+Expected CSV columns:
+- 序号, 商品名, 规格, 单位, CJID
 
 Rules:
-- Remove bracketed English letters in medicine name, e.g. (JZ), （JZ）, （JZ), (JZ）
-- Keep other bracketed Chinese text intact, e.g. 附片（黑顺片）
+- Remove bracketed English tags in medicine_name, e.g. (JZ), （JZ）, （JZ), (JZ）
+- Keep Chinese bracket notes intact, e.g. 附片（黑顺片）
 - Upsert by CJID
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import re
 import sqlite3
-import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 
-HEADER_KEYWORDS = ("序号", "商品名", "规格", "单位", "CJID")
-# Remove only bracket groups containing English letters (and optional spaces), not Chinese text.
+# Remove only bracket groups containing English letters (and optional spaces).
 EN_BRACKET_PATTERN = re.compile(r"[（(]\s*[A-Za-z]+\s*[)）]")
-SPLIT_PATTERN = re.compile(r"^\s*(\d+)\s+(.+?)\s+([^\s]+)\s+([^\s]+)\s+(\d+)\s*$")
+
+HEADER_ALIASES = {
+    "name": ("商品名", "品名", "medicine_name", "name"),
+    "spec": ("规格", "specification", "spec"),
+    "unit": ("单位", "unit"),
+    "cjid": ("CJID", "cjid", "cj_id", "院内编码", "编码"),
+}
 
 
 @dataclass
@@ -41,32 +45,77 @@ def normalize_name(name: str) -> str:
     return cleaned
 
 
-def parse_lines(lines: Iterable[str]) -> list[Item]:
-    items: list[Item] = []
-    for raw in lines:
-        line = raw.strip()
-        if not line:
-            continue
-        if all(k in line for k in HEADER_KEYWORDS):
-            continue
+def normalize_header(value: str) -> str:
+    return re.sub(r"\s+", "", (value or "")).strip().lower()
 
-        parts = line.split("\t")
-        if len(parts) >= 5 and parts[0].strip().isdigit():
-            _, name, spec, unit, cjid = parts[:5]
-        else:
-            m = SPLIT_PATTERN.match(line)
-            if not m:
-                continue
-            _, name, spec, unit, cjid = m.groups()
 
-        items.append(
-            Item(
-                medicine_name=normalize_name(name),
-                specification=spec.strip(),
-                unit=unit.strip() or "包",
-                cjid=int(str(cjid).strip()),
+def resolve_columns(fieldnames: list[str]) -> dict[str, str]:
+    normalized_to_original = {
+        normalize_header(name): name
+        for name in fieldnames
+        if name is not None
+    }
+
+    resolved: dict[str, str] = {}
+    for key, aliases in HEADER_ALIASES.items():
+        found = None
+        for alias in aliases:
+            candidate = normalized_to_original.get(normalize_header(alias))
+            if candidate:
+                found = candidate
+                break
+        if not found:
+            raise RuntimeError(
+                f"Missing CSV column for '{key}'. Existing columns: {fieldnames}"
             )
-        )
+        resolved[key] = found
+
+    return resolved
+
+
+def parse_cjid(value: str, line_no: int) -> int:
+    raw = (value or "").strip()
+    if not raw:
+        raise RuntimeError(f"Missing CJID at CSV line {line_no}")
+
+    if re.fullmatch(r"\d+", raw):
+        return int(raw)
+    if re.fullmatch(r"\d+\.0+", raw):
+        return int(raw.split(".", 1)[0])
+
+    raise RuntimeError(f"Invalid CJID '{raw}' at CSV line {line_no}")
+
+
+def parse_csv(input_path: Path, encoding: str) -> list[Item]:
+    with input_path.open("r", encoding=encoding, newline="") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            raise RuntimeError("CSV header not found")
+
+        columns = resolve_columns(reader.fieldnames)
+        items: list[Item] = []
+
+        for line_no, row in enumerate(reader, start=2):
+            name_raw = (row.get(columns["name"]) or "").strip()
+            spec_raw = (row.get(columns["spec"]) or "").strip()
+            unit_raw = (row.get(columns["unit"]) or "").strip()
+            cjid_raw = (row.get(columns["cjid"]) or "").strip()
+
+            if not any([name_raw, spec_raw, unit_raw, cjid_raw]):
+                continue
+
+            cjid = parse_cjid(cjid_raw, line_no)
+            if not name_raw:
+                raise RuntimeError(f"Missing medicine_name at CSV line {line_no}")
+
+            items.append(
+                Item(
+                    medicine_name=normalize_name(name_raw),
+                    specification=spec_raw,
+                    unit=unit_raw or "包",
+                    cjid=cjid,
+                )
+            )
 
     # Deduplicate by CJID, keeping the last occurrence.
     dedup: dict[int, Item] = {}
@@ -132,30 +181,25 @@ def upsert_items(conn: sqlite3.Connection, items: list[Item]) -> tuple[int, int]
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Import tcm_medicine_dict into sqlite")
+    parser = argparse.ArgumentParser(description="Import tcm_medicine_dict into sqlite (CSV only)")
     parser.add_argument("--db", required=True, help="SQLite DB path")
-    parser.add_argument("--input", required=False, help="Input text/tsv path. If omitted, read from stdin")
-    parser.add_argument("--encoding", default="utf-8", help="Input file encoding (default: utf-8)")
+    parser.add_argument("--input", required=True, help="CSV file path")
+    parser.add_argument("--encoding", default="utf-8-sig", help="CSV encoding (default: utf-8-sig)")
     args = parser.parse_args()
 
     db_path = Path(args.db).expanduser().resolve()
+    input_path = Path(args.input).expanduser().resolve()
+
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+    if input_path.suffix.lower() != ".csv":
+        raise RuntimeError(f"Only CSV is supported. Got: {input_path.name}")
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if args.input:
-        input_path = Path(args.input).expanduser().resolve()
-        if not input_path.exists():
-            raise FileNotFoundError(f"Input file not found: {input_path}")
-        text = input_path.read_text(encoding=args.encoding)
-    else:
-        text = sys.stdin.read()
-        if not text.strip():
-            raise RuntimeError("No input received from stdin")
-
-    items = parse_lines(text.splitlines())
-
+    items = parse_csv(input_path, args.encoding)
     if not items:
-        raise RuntimeError("No valid rows parsed from input file")
+        raise RuntimeError("No valid rows parsed from CSV file")
 
     with sqlite3.connect(str(db_path)) as conn:
         inserted, updated = upsert_items(conn, items)
