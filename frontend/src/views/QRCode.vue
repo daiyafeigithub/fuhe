@@ -323,6 +323,7 @@ const generatedRecord = ref(null)
 const previewDialogVisible = ref(false)
 const previewRecord = ref(null)
 const PRINTER_CONFIG_STORAGE_KEY = 'qrcodePrinterConfig'
+const BROWSER_PRINT_TIP_STORAGE_KEY = 'qrcodeBrowserPrintTipShown'
 
 const printerConfig = reactive({
   enablePrinter: false,
@@ -848,21 +849,28 @@ const buildBrowserPrintHtml = (items) => {
   <html lang="zh-CN">
     <head>
       <meta charset="UTF-8" />
-      <title>标签打印</title>
+      <title></title>
       <style>
         @page {
           size: 50mm 35mm;
-          margin: 0;
+          margin: 0 !important;
         }
 
         * {
           box-sizing: border-box;
         }
 
+        html,
         body {
+          width: 100%;
+          height: 100%;
           margin: 0;
+          padding: 0;
+        }
+
+        body {
           font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif;
-          background: #aebfd2;
+          background: #eef1f4;
           color: #111;
         }
 
@@ -872,6 +880,7 @@ const buildBrowserPrintHtml = (items) => {
           gap: 16px;
           justify-content: center;
           padding: 16px;
+          min-height: 100%;
         }
 
         .print-label {
@@ -981,17 +990,29 @@ const buildBrowserPrintHtml = (items) => {
         }
 
         @media print {
+          html,
           body {
-            background: #fff;
+            width: 50mm;
+            height: 35mm;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden;
+            background: #fff !important;
           }
 
           .print-sheet {
+            width: 50mm;
+            min-height: 35mm;
             padding: 0;
+            margin: 0;
             gap: 0;
             display: block;
           }
 
           .print-label {
+            width: 50mm;
+            height: 35mm;
+            min-height: 35mm;
             box-shadow: none;
             page-break-inside: avoid;
             break-after: page;
@@ -1010,6 +1031,7 @@ const buildBrowserPrintHtml = (items) => {
       <main class="print-sheet">${cards}</main>
       <script>
         const images = Array.from(document.images || []);
+        document.title = '';
         Promise.all(images.map((img) => {
           if (img.complete) return Promise.resolve();
           return new Promise((resolve) => {
@@ -1026,6 +1048,23 @@ const buildBrowserPrintHtml = (items) => {
       <\/script>
     </body>
   </html>`
+}
+
+const showBrowserPrintSettingTip = () => {
+  let shouldShow = true
+
+  try {
+    shouldShow = localStorage.getItem(BROWSER_PRINT_TIP_STORAGE_KEY) !== '1'
+    if (shouldShow) {
+      localStorage.setItem(BROWSER_PRINT_TIP_STORAGE_KEY, '1')
+    }
+  } catch {
+    shouldShow = true
+  }
+
+  if (shouldShow) {
+    ElMessage.info('浏览器打印请在“更多设置”里关闭页眉和页脚，边距选“无”，纸张选 50mm x 35mm。')
+  }
 }
 
 const openBrowserPrint = (rows = []) => {
@@ -1071,6 +1110,7 @@ const handlePrint = async (row = null) => {
   savePrinterConfig(false)
 
   if (!printerConfig.enablePrinter) {
+    showBrowserPrintSettingTip()
     if (openBrowserPrint([targetRecord])) {
       ElMessage.success(`已打开浏览器打印窗口${printerConfig.copies > 1 ? `，共 ${printerConfig.copies} 份` : ''}`)
     }
@@ -1138,6 +1178,7 @@ const handleBatchPrint = async () => {
   savePrinterConfig(false)
 
   if (!printerConfig.enablePrinter) {
+    showBrowserPrintSettingTip()
     if (openBrowserPrint(selectedHistoryRows.value)) {
       ElMessage.success(`已打开批量标签打印窗口，共 ${selectedHistoryRows.value.length * printerConfig.copies} 张`)
     }
